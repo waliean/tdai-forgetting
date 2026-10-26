@@ -56,7 +56,18 @@ test("appendRecall honours a custom rank window", () => {
 });
 
 test("an unwritable log path fails quietly instead of killing the search", () => {
-  assert.equal(appendRecall("Z:\\nope\\access.jsonl", [{ record_id: "a", rank: 1 }], NOW), false);
+  // A path whose parent is a regular file fails on every platform. A
+  // platform-specific absolute path does not: on Linux the same string is a legal
+  // relative filename, so the append succeeds there and the assertion flips. This
+  // test originally used one, and CI caught it on ubuntu-latest.
+  const dir = mkdtempSync(join(tmpdir(), "tdai-recall-bad-"));
+  try {
+    const blocker = join(dir, "a-file");
+    writeFileSync(blocker, "x");
+    assert.equal(appendRecall(join(blocker, "access.jsonl"), [{ record_id: "a", rank: 1 }], NOW), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("fold accumulates counts and keeps the newest access time", () => {

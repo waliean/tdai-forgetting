@@ -14,7 +14,7 @@
 
 ## 快速开始
 
-需要 Node ≥ 22.16（用到内置 `node:sqlite`，不装任何数据库驱动）。
+需要 Node ≥ 22.18（内置 `node:sqlite` 加无标志的 TypeScript 支持；不装任何数据库驱动，也不装构建工具）。22.18 之前的 22.x 会直接报 `ERR_UNKNOWN_FILE_EXTENSION`——类型擦除在那一版才默认开启。
 
 ```bash
 git clone https://github.com/<owner>/tdai-forgetting

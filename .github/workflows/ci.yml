@@ -11,11 +11,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node 22.16 is the floor for node:sqlite type stripping; 24 is what the
-        # benchmarks were run on. Both must pass, because the CLI is the entry point
-        # most users touch first.
+        # 22.18.0 is the first LTS where type stripping is unflagged without
+        # --experimental-strip-types; earlier 22.x cannot run these .ts entry points
+        # at all (ERR_UNKNOWN_FILE_EXTENSION). 24 is what the benchmarks ran on.
         os: [ubuntu-latest, windows-latest]
-        node: [22.16.0, 24]
+        node: [22.18.0, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

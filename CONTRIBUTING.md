@@ -2,7 +2,7 @@
 
 ## 环境
 
-Node ≥ 22.16。用内置 `node:sqlite` 和 `node --test`，不装数据库驱动、不装测试框架。
+Node ≥ 22.18。用内置 `node:sqlite` 和 `node --test`，不装数据库驱动、不装测试框架。22.18 是类型擦除默认开启的第一版；更早的 22.x 需要加 `--experimental-strip-types` 才能跑，本仓库不打算为此加兼容层。
 
 ```bash
 npm install
