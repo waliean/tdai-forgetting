@@ -1,0 +1,18 @@
+node_modules/
+package-lock.json
+
+# Local corpus copies and derived plans. A memory database is personal data even
+# when the schema is public: never commit one, never commit a plan that quotes it.
+data/
+*.db
+*.db-wal
+*.db-shm
+plan-*.json
+*plan.json
+bench/ci-results.json
+bench/results-*.json
+
+# Scratch
+.scratch/
+coverage/
+*.log

@@ -1,0 +1,39 @@
+{
+  "name": "tdai-forgetting",
+  "version": "0.1.0",
+  "description": "Policy-based forgetting for TencentDB Agent Memory (tdai): retention scoring, pin semantics, redundancy-aware eviction, soft delete with audit.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "bin": {
+    "tdai-forget": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "test:watch": "node --test --watch test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "bench": "node bench/run-bench.ts"
+  },
+  "files": [
+    "src/",
+    "patches/",
+    "docs/"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0"
+  },
+  "optionalDependencies": {
+    "@node-rs/jieba": "^2.0.1"
+  },
+  "keywords": [
+    "agent-memory",
+    "forgetting",
+    "memory-decay",
+    "ebbinghaus",
+    "tdai",
+    "sqlite"
+  ]
+}

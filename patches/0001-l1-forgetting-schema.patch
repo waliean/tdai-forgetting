@@ -1,0 +1,74 @@
+Subject: [PATCH 1/3] MemoryCore: add forgetting columns and recall log hook point
+
+Adds the storage primitives a value-based forgetting policy needs. Purely
+additive: every column has a default, no existing query changes shape, and an
+older build of the gateway keeps working against a migrated database.
+
+Why the columns:
+  state             lets a record leave the recall set without being deleted.
+                    Deletion loses provenance; the research notes argue the
+                    "move out of recall first, purge later" ordering.
+  access_count      the only evidence that a memory was ever used. Without it,
+  last_access_time  "use it or lose it" has nothing to stand on, and tdai's own
+                    cleaner falls back to updated_time — which every dedup merge
+                    refreshes, so the longest-lived memories look newest.
+  forget_reason     why a record left the active set, copied into the audit row
+  forgotten_time    so an operator can answer "when and why" from one table.
+
+The l1_recallable view exists so the recall path filters archived rows in exactly
+one place. Sprinkling state = 'active' across five query sites is how a codebase
+ends up with six different definitions of "recallable".
+
+--- a/MemoryCore/src/core/store/sqlite.ts
++++ b/MemoryCore/src/core/store/sqlite.ts
+@@
+     this.db.exec(`
+       CREATE TABLE IF NOT EXISTS l1_records (
+         record_id TEXT PRIMARY KEY,
+         content TEXT NOT NULL,
+         type TEXT DEFAULT '',
+         priority INTEGER DEFAULT 50,
+         scene_name TEXT DEFAULT '',
+         session_key TEXT DEFAULT '',
+         session_id TEXT DEFAULT 'default',
+         team_id TEXT DEFAULT 'default',
+         task_id TEXT DEFAULT '',
+         user_id TEXT NOT NULL DEFAULT 'default',
+         agent_id TEXT NOT NULL DEFAULT 'default',
+         version INTEGER NOT NULL DEFAULT 0,
+         timestamp_str TEXT DEFAULT '',
+         timestamp_start TEXT DEFAULT '',
+         timestamp_end TEXT DEFAULT '',
+         created_time TEXT DEFAULT '',
+-        updated_time TEXT DEFAULT '',
+-        metadata_json TEXT DEFAULT '{}'
++        updated_time TEXT DEFAULT '',
++        metadata_json TEXT DEFAULT '{}',
++        state TEXT NOT NULL DEFAULT 'active',
++        access_count INTEGER NOT NULL DEFAULT 0,
++        last_access_time TEXT DEFAULT NULL,
++        forget_reason TEXT DEFAULT NULL,
++        forgotten_time TEXT DEFAULT NULL
+       )
+     `);
+@@
+     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
++    // Forgetting columns (see docs/design: value-based eviction needs a lifecycle
++    // state and access evidence). Same try/catch idiom as the migrations above.
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN state TEXT NOT NULL DEFAULT 'active'"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN last_access_time TEXT DEFAULT NULL"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN forget_reason TEXT DEFAULT NULL"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN forgotten_time TEXT DEFAULT NULL"); } catch { /* exists */ }
+     this.db.prepare("UPDATE l1_records SET team_id = ? WHERE team_id = '' OR team_id IS NULL").run(DEFAULT_ISOLATION_ID);
+@@
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_agent_updated ON l1_records(agent_id, updated_time)");
++    // Forgetting: the recall view filters on state; the planner sorts by score which
++    // needs the access columns, and audit queries scan by state.
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_state ON l1_records(state)");
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_last_access ON l1_records(last_access_time)");
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_access_count ON l1_records(access_count)");
++    this.db.exec("DROP VIEW IF EXISTS l1_recallable");
++    this.db.exec("CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active'");
+ 
+     // ── L1 FTS5 ───────────────────────────────────

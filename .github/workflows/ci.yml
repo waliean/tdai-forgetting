@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 22.16 is the floor for node:sqlite type stripping; 24 is what the
+        # benchmarks were run on. Both must pass, because the CLI is the entry point
+        # most users touch first.
+        os: [ubuntu-latest, windows-latest]
+        node: [22.16.0, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+
+  # The synthetic benchmark is deterministic, so this catches a change that makes the
+  # engine materially worse rather than merely different. It is a smoke gate, not a
+  # quality gate: the thresholds below were set from the numbers in
+  # docs/experiments, with slack for the shingle maths to move a little.
+  bench-regression:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: node bench/run-bench.ts --queries 24 --k 10 --out bench/ci-results.json
+      - name: Check duplicate share collapses
+        run: |
+          node -e "
+          const r = require('./bench/ci-results.json');
+          const forgetting = r.results.find((x) => x.configuration === 'forgetting');
+          const baseline = r.results.find((x) => x.configuration === 'baseline');
+          console.log('baseline dupShare', baseline.dupShare.toFixed(3), '→', forgetting.dupShare.toFixed(3));
+          if (forgetting.dupShare > 0.05) {
+            console.error('duplicate collapse regressed');
+            process.exit(1);
+          }
+          if (forgetting.pinRecall < baseline.pinRecall - 0.05) {
+            console.error('pin recall regressed');
+            process.exit(1);
+          }
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench/ci-results.json
