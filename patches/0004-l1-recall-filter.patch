@@ -1,0 +1,48 @@
+diff --git a/MemoryCore/src/core/store/sqlite.ts b/MemoryCore/src/core/store/sqlite.ts
+index 97cb3e6..4d25e07 100644
+--- a/MemoryCore/src/core/store/sqlite.ts
++++ b/MemoryCore/src/core/store/sqlite.ts
+@@ -746,10 +746,13 @@ export class VectorStore implements IMemoryStore {
+     }
+     this.stmtDeleteMeta = this.db.prepare("DELETE FROM l1_records WHERE record_id = ?");
+ 
++    // Reads go through the view so an archived record's vector stops producing a hit.
++    // searchL1Vector already skips a hit whose metadata is missing (it logs "vector
++    // but NO metadata (orphan)"), so this degrades into "skipped", not "half-filled".
+     this.stmtGetMeta = this.db.prepare(`
+       SELECT content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id,
+              version, timestamp_str, timestamp_start, timestamp_end, metadata_json
+-      FROM l1_records WHERE record_id = ?
++      FROM l1_recallable WHERE record_id = ?
+     `);
+ 
+     if (this.dimensions > 0) {
+@@ -1157,14 +1160,22 @@ export class VectorStore implements IMemoryStore {
+ 
+       this.stmtL1FtsDelete = this.db.prepare("DELETE FROM l1_fts WHERE record_id = ?");
+ 
++      // The JOIN onto l1_records is what makes archiving effective on the FTS path.
++      // l1_fts is a separate table: nothing removes a row from it when a record is
++      // archived, so without this filter a forgotten record stays retrievable. Today
++      // the candidate window happens to hide it (measured: an archived record landed
++      // at BM25 rank 188 for a common token), which is a coincidence of term
++      // frequency, not a guarantee. Cost on an 822-record corpus: first query after a
++      // cold cache 0.42 ms → 2.45 ms, subsequent queries +0.1–0.2 ms.
+       this.stmtL1FtsSearch = this.db.prepare(`
+-        SELECT record_id, content_original AS content, type, priority, scene_name,
+-               session_key, session_id, team_id, task_id, user_id, agent_id, version,
+-               timestamp_str, timestamp_start, timestamp_end,
+-               metadata_json,
++        SELECT f.record_id, f.content_original AS content, f.type, f.priority, f.scene_name,
++               f.session_key, f.session_id, f.team_id, f.task_id, f.user_id, f.agent_id, f.version,
++               f.timestamp_str, f.timestamp_start, f.timestamp_end,
++               f.metadata_json,
+                bm25(l1_fts) AS rank
+-        FROM l1_fts
+-        WHERE l1_fts MATCH ?
++        FROM l1_fts f
++        JOIN l1_records m ON m.record_id = f.record_id
++        WHERE l1_fts MATCH ? AND m.state = 'active'
+         ORDER BY rank ASC
+         LIMIT ?
+       `);

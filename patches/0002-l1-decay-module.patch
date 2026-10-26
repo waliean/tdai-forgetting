@@ -1,0 +1,207 @@
+diff --git a/MemoryCore/src/core/record/l1-decay.ts b/MemoryCore/src/core/record/l1-decay.ts
+new file mode 100644
+index 0000000..202378b
+--- /dev/null
++++ b/MemoryCore/src/core/record/l1-decay.ts
+@@ -0,0 +1,201 @@
++/**
++ * Drop-in retention re-rank for MemoryCore.
++ *
++ * This file is written to be copied into `MemoryCore/src/core/record/l1-decay.ts`
++ * verbatim: no imports from this repository, no dependencies beyond the standard
++ * library, no knowledge of sqlite. The patch in `patches/0002-l1-recall-decay.patch`
++ * calls into it from the search path.
++ *
++ * Keeping the shipped code and the upstream-shaped code literally the same file is
++ * the only way "tested here" means anything for "runs there". If they diverge, the
++ * tests in this repo stop covering what ships.
++ *
++ * Behaviour, in one paragraph: a search hit's fused score is multiplied by a factor
++ * in [0.3, 1.5]. The factor rises with recency (half-life decay) and with usage
++ * (diminishing returns on access count). Pinned records get exactly 1.0 — immune to
++ * decay, not promoted above better matches. When no record in the candidate set
++ * carries access history, the age term is switched off for the whole set: age is
++ * evidence of disuse only if someone is recording use.
++ */
++
++/** Input shape: the subset of MemorySearchResultItem the re-rank reads. */
++export interface DecayCandidate {
++  id: string;
++  content: string;
++  type: string;
++  priority: number;
++  score: number;
++  created_at: string;
++  updated_at: string;
++  /** Absent on databases that predate access tracking. */
++  access_count?: number;
++  last_access_time?: string | null;
++  /** Absent unless the reader selects it. */
++  state?: string;
++}
++
++export interface DecaySettings {
++  /** Days after which an untouched memory keeps half its decay weight. */
++  halfLifeDays?: number;
++  /** Lower bound of the multiplier; mem0 uses 0.3. */
++  floor?: number;
++  /** Upper bound of the multiplier. */
++  ceiling?: number;
++  /** Access count earning ~63% of the usage bonus. */
++  usageSaturation?: number;
++  /** How much a full usage score adds on top of the decay term. */
++  usageBoost?: number;
++  /** Minimum share of candidates with access history before age is used at all. */
++  minTrackingCoverage?: number;
++  /** Clock injection. */
++  now?: Date;
++}
++
++export const DEFAULT_DECAY_SETTINGS: Required<Omit<DecaySettings, "now">> = {
++  halfLifeDays: 30,
++  floor: 0.3,
++  ceiling: 1.5,
++  usageSaturation: 5,
++  usageBoost: 0.5,
++  minTrackingCoverage: 0.1,
++};
++
++const MS_PER_DAY = 86_400_000;
++/** tdai's persisted convention for "global instruction, never forget". */
++const GLOBAL_INSTRUCTION_PRIORITY = -1;
++
++export interface DecayOutcome {
++  /** Multiplier applied to the fused score. */
++  multiplier: number;
++  /** Multiplied score, the sort key. */
++  weightedScore: number;
++  /** Same value clamped into [0, 1], what the API reports. */
++  reportedScore: number;
++  /** Why the multiplier is what it is, for debug logs. */
++  reason: "pinned" | "decayed" | "decay-off";
++}
++
++function clamp(value: number, min: number, max: number): number {
++  if (!Number.isFinite(value)) return min;
++  return Math.min(max, Math.max(min, value));
++}
++
++function anchorOf(candidate: DecayCandidate): string {
++  return candidate.last_access_time || candidate.updated_at || candidate.created_at;
++}
++
++function ageDaysOf(candidate: DecayCandidate, now: Date): number {
++  const parsed = Date.parse(anchorOf(candidate));
++  if (Number.isNaN(parsed)) return 0;
++  const age = (now.getTime() - parsed) / MS_PER_DAY;
++  return age > 0 ? age : 0;
++}
++
++function isPinned(candidate: DecayCandidate): boolean {
++  return candidate.priority === GLOBAL_INSTRUCTION_PRIORITY && candidate.state !== "archived";
++}
++
++/** True when the record carries evidence about its own use. */
++function hasAccessEvidence(candidate: DecayCandidate): boolean {
++  if ((candidate.access_count ?? 0) > 0) return true;
++  return !!candidate.last_access_time;
++}
++
++/** Share of candidates with access evidence, in [0, 1]. */
++export function trackingCoverageOf(candidates: DecayCandidate[]): number {
++  if (candidates.length === 0) return 0;
++  let tracked = 0;
++  for (const candidate of candidates) if (hasAccessEvidence(candidate)) tracked++;
++  return tracked / candidates.length;
++}
++
++/**
++ * Compute one candidate's multiplier.
++ *
++ * `decayOn = false` keeps the usage boost and drops the age term, so a recently
++ * recalled memory still rises while an old one is not punished for being old.
++ */
++export function decayOutcome(
++  candidate: DecayCandidate,
++  settings: DecaySettings = {},
++  decayOn?: boolean,
++): DecayOutcome {
++  const cfg = { ...DEFAULT_DECAY_SETTINGS, ...settings };
++  const now = settings.now ?? new Date();
++  const decayActive = decayOn ?? true;
++
++  const decay = decayActive
++    ? cfg.floor + (1 - cfg.floor) * Math.pow(2, -ageDaysOf(candidate, now) / Math.max(cfg.halfLifeDays, 1e-6))
++    : 1;
++  const accessCount = candidate.access_count ?? 0;
++  const usage = accessCount > 0 ? 1 - Math.exp(-accessCount / Math.max(cfg.usageSaturation, 1e-6)) : 0;
++
++  // A pin means "never decay". It does not mean "always first": measured against an
++  // embedding ground truth, promoting pins to the ceiling cost 5 points of
++  // precision@10 by pushing mediocre pinned memories over better matches.
++  const multiplier = isPinned(candidate) ? 1 : clamp(decay + cfg.usageBoost * usage, cfg.floor, cfg.ceiling);
++  const weightedScore = candidate.score * multiplier;
++
++  return {
++    multiplier,
++    weightedScore,
++    reportedScore: clamp(weightedScore, 0, 1),
++    reason: isPinned(candidate) ? "pinned" : decayActive ? "decayed" : "decay-off",
++  };
++}
++
++export interface RerankResult<T extends DecayCandidate> {
++  candidate: T;
++  outcome: DecayOutcome;
++}
++
++/**
++ * Re-rank a candidate list in place-free fashion.
++ *
++ * The decision to use age is taken once for the whole list. A per-candidate
++ * decision would split one ranking across two policies and produce an order that
++ * means nothing in particular.
++ */
++export function rerankCandidates<T extends DecayCandidate>(
++  candidates: T[],
++  settings: DecaySettings = {},
++): Array<RerankResult<T>> {
++  const cfg = { ...DEFAULT_DECAY_SETTINGS, ...settings };
++  const coverage = trackingCoverageOf(candidates);
++  const decayOn = coverage >= cfg.minTrackingCoverage;
++
++  const results = candidates.map((candidate) => ({
++    candidate,
++    outcome: decayOutcome(candidate, settings, decayOn),
++  }));
++  results.sort((a, b) => b.outcome.weightedScore - a.outcome.weightedScore);
++  return results;
++}
++
++/** Minimal logger contract so this file does not depend on MemoryCore's Logger. */
++export interface DecayLogger {
++  debug?: (message: string) => void;
++}
++
++/**
++ * Apply the re-rank to MemoryCore's search result shape and log the decision.
++ *
++ * Kept separate from `rerankCandidates` so the pure function stays testable and the
++ * MemoryCore-flavoured wrapper is the only part that knows about logging.
++ */
++export async function rerankL1<T extends DecayCandidate>(
++  results: T[],
++  settings: DecaySettings,
++  logger?: DecayLogger,
++): Promise<T[]> {
++  if (results.length === 0) return results;
++  const coverage = trackingCoverageOf(results);
++  const decayOn = coverage >= (settings.minTrackingCoverage ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage);
++  logger?.debug?.(
++    `[l1-decay] candidates=${results.length}, coverage=${(coverage * 100).toFixed(0)}%, ` +
++      `decay=${decayOn ? "on" : "off (cold start)"}, halfLife=${settings.halfLifeDays ?? DEFAULT_DECAY_SETTINGS.halfLifeDays}d`,
++  );
++  const ranked = rerankCandidates(results, settings);
++  // Report the clamped score so the API contract (score in [0,1]) does not change.
++  return ranked.map(({ candidate, outcome }) => ({ ...candidate, score: outcome.reportedScore }));
++}

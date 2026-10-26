@@ -1,0 +1,60 @@
+diff --git a/MemoryCore/src/core/tools/memory-search.ts b/MemoryCore/src/core/tools/memory-search.ts
+index d42f138..a95db98 100644
+--- a/MemoryCore/src/core/tools/memory-search.ts
++++ b/MemoryCore/src/core/tools/memory-search.ts
+@@ -14,6 +14,12 @@ import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/typ
+ import { buildFtsQuery } from "../store/sqlite.js";
+ import type { EmbeddingService } from "../store/embedding.js";
+ import type { Logger } from "../types.js";
++import {
++  DEFAULT_DECAY_SETTINGS,
++  rerankCandidates,
++  trackingCoverageOf,
++  type DecaySettings,
++} from "../record/l1-decay.js";
+ 
+ // ============================
+ // Types
+@@ -93,6 +99,11 @@ export async function executeMemorySearch(params: {
+   vectorStore?: IMemoryStore;
+   embeddingService?: EmbeddingService;
+   logger?: Logger;
++  /**
++   * Retention decay settings. Absent means "rank on relevance alone", which is the
++   * behaviour of every caller that has not opted in.
++   */
++  decay?: DecaySettings;
+ }): Promise<MemorySearchResult> {
+   const {
+     query,
+@@ -103,6 +114,7 @@ export async function executeMemorySearch(params: {
+     vectorStore,
+     embeddingService,
+     logger,
++    decay,
+   } = params;
+ 
+   logger?.debug?.(
+@@ -299,6 +311,22 @@ export async function executeMemorySearch(params: {
+     logger?.debug?.(`${TAG} After scene filter "${sceneFilter}": ${results.length}/${preFilterCount}`);
+   }
+ 
++  // ── Retention re-rank, then trim ──
++  // Over-retrieval above (candidateK = limit * 3) is what gives the re-rank room to
++  // work: without it, decay could only shuffle records that already fit.
++  if (decay) {
++    const coverage = trackingCoverageOf(results);
++    const decayOn = coverage >= (decay.minTrackingCoverage ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage);
++    logger?.debug?.(
++      `${TAG} [decay] candidates=${results.length}, coverage=${(coverage * 100).toFixed(0)}%, ` +
++        `decay=${decayOn ? "on" : "off (cold start)"}`,
++    );
++    results = rerankCandidates(results, decay).map(({ candidate, outcome }) => ({
++      ...candidate,
++      score: outcome.reportedScore,
++    }));
++  }
++
+   // ── Trim to requested limit ──
+   const trimmed = results.slice(0, limit);
+ 

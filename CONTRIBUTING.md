@@ -6,7 +6,7 @@ Node ≥ 22.18。用内置 `node:sqlite` 和 `node --test`，不装数据库驱�
 
 ```bash
 npm install
-npm test        # 98 个测试
+npm test        # 103 个测试
 npm run typecheck
 ```
 

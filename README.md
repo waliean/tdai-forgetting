@@ -10,7 +10,9 @@
 
 改动落在三处：存储 schema（加列）、检索排序（改打分）、清理策略（新增）。三处都有回滚成本，而 tdai 上游把"基于策略的批量遗忘"明确列为 out of scope。所以先进独立仓库，出补丁、跑数据、拿对照结果，再决定回灌。
 
-代码不复制 upstream，只做两件事：一是给出可以合并进去的补丁（`patches/`），二是把补丁里那个纯函数原样放在 `src/l1-decay.ts`，跑测试的就是将来上线的那个文件。
+代码不复制 upstream，只做两件事：一是给出可以合并进去的补丁（`patches/`，四份，已在当前 upstream 上验证可应用、可构建），二是把补丁里那个纯函数原样放在 `src/l1-decay.ts`，跑测试的就是将来上线的那个文件。
+
+补丁验证过程里发现了一个真缺陷：归档只改 `l1_records.state`，`l1_fts` 里的行还在，所以记录归档后仍能被召回。视图挡不住——两条检索路径根本不读视图。修法与实测见 [补丁落地验证](docs/design/补丁落地验证-2026-10-26.md)。
 
 ## 快速开始
 
@@ -20,7 +22,7 @@
 git clone https://github.com/<owner>/tdai-forgetting
 cd tdai-forgetting
 npm install
-npm test                      # 98 个测试，Node 内置 test runner
+npm test                      # 103 个测试，Node 内置 test runner
 ```
 
 对着你自己的 tdai 数据库跑（只读，不会写任何东西）：
@@ -140,9 +142,9 @@ state: active | archived | retired | deleted
 ```
 src/                 遗忘引擎（打分 / pin / 冗余 / 计划 / 落库 / 访问日志）
 src/l1-decay.ts      原样放进 MemoryCore 的纯函数，测试的就是上线的这份
-patches/             准备回灌 upstream 的补丁
+patches/             回灌 upstream 的四份补丁（已验证可应用、可构建）
 bench/               对照实验（合成语料、真实快照、受控过期语料）
-test/                98 个测试，node --test
+test/                103 个测试，node --test
 docs/research/       业界遗忘机制调研
 docs/design/         缺口诊断与方案设计
 docs/experiments/    实测报告
@@ -151,7 +153,8 @@ docs/experiments/    实测报告
 ## 边界与已知问题
 
 - **没有自动调度**。第一版故意只提供命令，不提供定时任务。阈值应该先被人工审几轮再自动化。
-- **访问追踪需要改检索路径**。目前提供 append-only 日志 + 离线折叠（`src/recall.ts`），接进 gateway 的补丁还没验证过。
+- **访问追踪需要改检索路径**。目前提供 append-only 日志 + 离线折叠（`src/recall.ts`），接进 gateway 的补丁没做——四份补丁里不包含它。
+- **容器内冒烟未做**。补丁能应用、能构建、被改文件零类型错误，但没在真实容器里跑过。
 - **只处理 L1**。L0 对话、L2 场景、L3 画像的淘汰策略不同，不在本次范围。
 - **shingle 相似度对长文本偏保守**。几百字以上的记录做 4-gram 比较会稀释相似度，阈值可能需要按长度分档。
 - **冷启动门槛 10% 是拍的**，只在两三份语料上验证过，样本不够。
