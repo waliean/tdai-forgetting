@@ -1,0 +1,640 @@
+diff --git a/MemoryCore/src/config.ts b/MemoryCore/src/config.ts
+index 438867b..e164c89 100644
+--- a/MemoryCore/src/config.ts
++++ b/MemoryCore/src/config.ts
+@@ -7,6 +7,11 @@
+  * Minimal config (zero config): {} — all fields have sensible defaults.
+  */
+ 
++// The decay defaults live with the re-rank itself (core/record/l1-decay.ts) so
++// there is one definition of "30 days" rather than one per layer. That module
++// imports nothing, so this stays a leaf dependency.
++import { DEFAULT_DECAY_SETTINGS, type DecaySettings } from "./core/record/l1-decay.js";
++
+ // ============================
+ // Type definitions
+ // ============================
+@@ -107,6 +112,36 @@ export interface PipelineTriggerConfig {
+   sessionActiveWindowHours: number;
+ }
+ 
++/**
++ * Retention decay settings (`memory.recall.decay`) — the re-rank that trades a
++ * little relevance for "use it or lose it".
++ *
++ * **Off by default, on purpose.** Turning it on changes the order of search
++ * results for every caller, so it is a behaviour change that has to be asked
++ * for. A config that does not mention `decay` must produce exactly the ordering
++ * of a build without the re-rank at all — that is why `recallDecaySettings()`
++ * returns `undefined` unless `enabled` is literally true.
++ *
++ * The numbers default to `DEFAULT_DECAY_SETTINGS` in core/record/l1-decay.ts so
++ * there is one definition of them, not two that drift.
++ */
++export interface RecallDecayConfig {
++  /** Run the retention re-rank (default: false). */
++  enabled: boolean;
++  /** Days after which an untouched memory keeps half of its decay weight. */
++  halfLifeDays: number;
++  /** Lower bound of the multiplier. */
++  floor: number;
++  /** Upper bound of the multiplier. */
++  ceiling: number;
++  /** Access count that earns ~63% of the usage bonus. */
++  usageSaturation: number;
++  /** How much a full usage score adds on top of the decay term. */
++  usageBoost: number;
++  /** Share of candidates that must carry access history before age is used. */
++  minTrackingCoverage: number;
++}
++
+ /** Recall settings — controls memory retrieval for context injection. */
+ export interface RecallConfig {
+   /** Enable auto-recall (default: true) */
+@@ -123,6 +158,8 @@ export interface RecallConfig {
+   strategy: "embedding" | "keyword" | "hybrid";
+   /** Overall recall timeout in milliseconds (default: 5000). When exceeded, recall is skipped with a warning. */
+   timeoutMs: number;
++  /** Retention re-rank settings (default: disabled). */
++  decay: RecallDecayConfig;
+ }
+ 
+ /** Embedding service configuration for vector search. */
+@@ -490,6 +527,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
+ 
+   // --- Recall ---
+   const recallGroup = obj(c, "recall");
++  // Optional sub-group; `obj()` yields {} when absent, so a config written before
++  // this feature parses to "everything default", including enabled=false.
++  const recallDecayGroup = obj(recallGroup, "decay");
+ 
+   // --- Embedding ---
+   const embeddingGroup = obj(c, "embedding");
+@@ -694,6 +734,17 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
+       scoreThreshold: num(recallGroup, "scoreThreshold") ?? 0.3,
+       strategy: validateStrategy(str(recallGroup, "strategy")) ?? "hybrid",
+       timeoutMs: num(recallGroup, "timeoutMs") ?? 5000,
++      // Defaults mirror DEFAULT_DECAY_SETTINGS so the two never disagree; the
++      // switch itself defaults to false (see RecallDecayConfig).
++      decay: {
++        enabled: bool(recallDecayGroup, "enabled") ?? false,
++        halfLifeDays: num(recallDecayGroup, "halfLifeDays") ?? DEFAULT_DECAY_SETTINGS.halfLifeDays,
++        floor: num(recallDecayGroup, "floor") ?? DEFAULT_DECAY_SETTINGS.floor,
++        ceiling: num(recallDecayGroup, "ceiling") ?? DEFAULT_DECAY_SETTINGS.ceiling,
++        usageSaturation: num(recallDecayGroup, "usageSaturation") ?? DEFAULT_DECAY_SETTINGS.usageSaturation,
++        usageBoost: num(recallDecayGroup, "usageBoost") ?? DEFAULT_DECAY_SETTINGS.usageBoost,
++        minTrackingCoverage: num(recallDecayGroup, "minTrackingCoverage") ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage,
++      },
+     },
+     embedding: {
+       enabled: embeddingEnabled,
+@@ -824,6 +875,21 @@ function validateStrategy(value: string | undefined): RecallConfig["strategy"] |
+     : undefined;
+ }
+ 
++/**
++ * Settings for `executeMemorySearch({ decay })`, or undefined when the re-rank
++ * is off.
++ *
++ * Deliberately not "always return a settings object with enabled=false": the
++ * search path's contract is "no `decay` argument means rank on relevance
++ * alone", and an object — any object — would turn the branch on. Keeping the
++ * gate at one place means a caller cannot half-enable it.
++ */
++export function recallDecaySettings(recall: RecallConfig): DecaySettings | undefined {
++  if (!recall.decay.enabled) return undefined;
++  const { enabled: _enabled, ...numeric } = recall.decay;
++  return numeric;
++}
++
+ /**
+  * Normalize a cleanup time string.
+  *
+diff --git a/MemoryCore/src/core/record/l1-decay.ts b/MemoryCore/src/core/record/l1-decay.ts
+new file mode 100644
+index 0000000..202378b
+--- /dev/null
++++ b/MemoryCore/src/core/record/l1-decay.ts
+@@ -0,0 +1,201 @@
++/**
++ * Drop-in retention re-rank for MemoryCore.
++ *
++ * This file is written to be copied into `MemoryCore/src/core/record/l1-decay.ts`
++ * verbatim: no imports from this repository, no dependencies beyond the standard
++ * library, no knowledge of sqlite. The patch in `patches/0002-l1-recall-decay.patch`
++ * calls into it from the search path.
++ *
++ * Keeping the shipped code and the upstream-shaped code literally the same file is
++ * the only way "tested here" means anything for "runs there". If they diverge, the
++ * tests in this repo stop covering what ships.
++ *
++ * Behaviour, in one paragraph: a search hit's fused score is multiplied by a factor
++ * in [0.3, 1.5]. The factor rises with recency (half-life decay) and with usage
++ * (diminishing returns on access count). Pinned records get exactly 1.0 — immune to
++ * decay, not promoted above better matches. When no record in the candidate set
++ * carries access history, the age term is switched off for the whole set: age is
++ * evidence of disuse only if someone is recording use.
++ */
++
++/** Input shape: the subset of MemorySearchResultItem the re-rank reads. */
++export interface DecayCandidate {
++  id: string;
++  content: string;
++  type: string;
++  priority: number;
++  score: number;
++  created_at: string;
++  updated_at: string;
++  /** Absent on databases that predate access tracking. */
++  access_count?: number;
++  last_access_time?: string | null;
++  /** Absent unless the reader selects it. */
++  state?: string;
++}
++
++export interface DecaySettings {
++  /** Days after which an untouched memory keeps half its decay weight. */
++  halfLifeDays?: number;
++  /** Lower bound of the multiplier; mem0 uses 0.3. */
++  floor?: number;
++  /** Upper bound of the multiplier. */
++  ceiling?: number;
++  /** Access count earning ~63% of the usage bonus. */
++  usageSaturation?: number;
++  /** How much a full usage score adds on top of the decay term. */
++  usageBoost?: number;
++  /** Minimum share of candidates with access history before age is used at all. */
++  minTrackingCoverage?: number;
++  /** Clock injection. */
++  now?: Date;
++}
++
++export const DEFAULT_DECAY_SETTINGS: Required<Omit<DecaySettings, "now">> = {
++  halfLifeDays: 30,
++  floor: 0.3,
++  ceiling: 1.5,
++  usageSaturation: 5,
++  usageBoost: 0.5,
++  minTrackingCoverage: 0.1,
++};
++
++const MS_PER_DAY = 86_400_000;
++/** tdai's persisted convention for "global instruction, never forget". */
++const GLOBAL_INSTRUCTION_PRIORITY = -1;
++
++export interface DecayOutcome {
++  /** Multiplier applied to the fused score. */
++  multiplier: number;
++  /** Multiplied score, the sort key. */
++  weightedScore: number;
++  /** Same value clamped into [0, 1], what the API reports. */
++  reportedScore: number;
++  /** Why the multiplier is what it is, for debug logs. */
++  reason: "pinned" | "decayed" | "decay-off";
++}
++
++function clamp(value: number, min: number, max: number): number {
++  if (!Number.isFinite(value)) return min;
++  return Math.min(max, Math.max(min, value));
++}
++
++function anchorOf(candidate: DecayCandidate): string {
++  return candidate.last_access_time || candidate.updated_at || candidate.created_at;
++}
++
++function ageDaysOf(candidate: DecayCandidate, now: Date): number {
++  const parsed = Date.parse(anchorOf(candidate));
++  if (Number.isNaN(parsed)) return 0;
++  const age = (now.getTime() - parsed) / MS_PER_DAY;
++  return age > 0 ? age : 0;
++}
++
++function isPinned(candidate: DecayCandidate): boolean {
++  return candidate.priority === GLOBAL_INSTRUCTION_PRIORITY && candidate.state !== "archived";
++}
++
++/** True when the record carries evidence about its own use. */
++function hasAccessEvidence(candidate: DecayCandidate): boolean {
++  if ((candidate.access_count ?? 0) > 0) return true;
++  return !!candidate.last_access_time;
++}
++
++/** Share of candidates with access evidence, in [0, 1]. */
++export function trackingCoverageOf(candidates: DecayCandidate[]): number {
++  if (candidates.length === 0) return 0;
++  let tracked = 0;
++  for (const candidate of candidates) if (hasAccessEvidence(candidate)) tracked++;
++  return tracked / candidates.length;
++}
++
++/**
++ * Compute one candidate's multiplier.
++ *
++ * `decayOn = false` keeps the usage boost and drops the age term, so a recently
++ * recalled memory still rises while an old one is not punished for being old.
++ */
++export function decayOutcome(
++  candidate: DecayCandidate,
++  settings: DecaySettings = {},
++  decayOn?: boolean,
++): DecayOutcome {
++  const cfg = { ...DEFAULT_DECAY_SETTINGS, ...settings };
++  const now = settings.now ?? new Date();
++  const decayActive = decayOn ?? true;
++
++  const decay = decayActive
++    ? cfg.floor + (1 - cfg.floor) * Math.pow(2, -ageDaysOf(candidate, now) / Math.max(cfg.halfLifeDays, 1e-6))
++    : 1;
++  const accessCount = candidate.access_count ?? 0;
++  const usage = accessCount > 0 ? 1 - Math.exp(-accessCount / Math.max(cfg.usageSaturation, 1e-6)) : 0;
++
++  // A pin means "never decay". It does not mean "always first": measured against an
++  // embedding ground truth, promoting pins to the ceiling cost 5 points of
++  // precision@10 by pushing mediocre pinned memories over better matches.
++  const multiplier = isPinned(candidate) ? 1 : clamp(decay + cfg.usageBoost * usage, cfg.floor, cfg.ceiling);
++  const weightedScore = candidate.score * multiplier;
++
++  return {
++    multiplier,
++    weightedScore,
++    reportedScore: clamp(weightedScore, 0, 1),
++    reason: isPinned(candidate) ? "pinned" : decayActive ? "decayed" : "decay-off",
++  };
++}
++
++export interface RerankResult<T extends DecayCandidate> {
++  candidate: T;
++  outcome: DecayOutcome;
++}
++
++/**
++ * Re-rank a candidate list in place-free fashion.
++ *
++ * The decision to use age is taken once for the whole list. A per-candidate
++ * decision would split one ranking across two policies and produce an order that
++ * means nothing in particular.
++ */
++export function rerankCandidates<T extends DecayCandidate>(
++  candidates: T[],
++  settings: DecaySettings = {},
++): Array<RerankResult<T>> {
++  const cfg = { ...DEFAULT_DECAY_SETTINGS, ...settings };
++  const coverage = trackingCoverageOf(candidates);
++  const decayOn = coverage >= cfg.minTrackingCoverage;
++
++  const results = candidates.map((candidate) => ({
++    candidate,
++    outcome: decayOutcome(candidate, settings, decayOn),
++  }));
++  results.sort((a, b) => b.outcome.weightedScore - a.outcome.weightedScore);
++  return results;
++}
++
++/** Minimal logger contract so this file does not depend on MemoryCore's Logger. */
++export interface DecayLogger {
++  debug?: (message: string) => void;
++}
++
++/**
++ * Apply the re-rank to MemoryCore's search result shape and log the decision.
++ *
++ * Kept separate from `rerankCandidates` so the pure function stays testable and the
++ * MemoryCore-flavoured wrapper is the only part that knows about logging.
++ */
++export async function rerankL1<T extends DecayCandidate>(
++  results: T[],
++  settings: DecaySettings,
++  logger?: DecayLogger,
++): Promise<T[]> {
++  if (results.length === 0) return results;
++  const coverage = trackingCoverageOf(results);
++  const decayOn = coverage >= (settings.minTrackingCoverage ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage);
++  logger?.debug?.(
++    `[l1-decay] candidates=${results.length}, coverage=${(coverage * 100).toFixed(0)}%, ` +
++      `decay=${decayOn ? "on" : "off (cold start)"}, halfLife=${settings.halfLifeDays ?? DEFAULT_DECAY_SETTINGS.halfLifeDays}d`,
++  );
++  const ranked = rerankCandidates(results, settings);
++  // Report the clamped score so the API contract (score in [0,1]) does not change.
++  return ranked.map(({ candidate, outcome }) => ({ ...candidate, score: outcome.reportedScore }));
++}
+diff --git a/MemoryCore/src/core/store/sqlite/memory-store.ts b/MemoryCore/src/core/store/sqlite/memory-store.ts
+index c0ffaec..5f96e26 100644
+--- a/MemoryCore/src/core/store/sqlite/memory-store.ts
++++ b/MemoryCore/src/core/store/sqlite/memory-store.ts
+@@ -102,6 +102,13 @@ export interface VectorSearchResult {
+   agent_id: string;
+   /** Raw metadata JSON string (e.g., contains activity_start_time / activity_end_time for episodic) */
+   metadata_json: string;
++  /**
++   * Retention signals from `l1_records` (0101). Carried all the way to the
++   * re-rank because without them `trackingCoverageOf` scores 0 and aging is
++   * switched off — silently, with no error anywhere in the chain.
++   */
++  access_count?: number;
++  last_access_time?: string | null;
+ }
+ 
+ /** L0 single-message vector search result. */
+@@ -199,6 +206,9 @@ export interface FtsSearchResult {
+   user_id: string;
+   agent_id: string;
+   metadata_json: string;
++  /** Retention signals — see VectorSearchResult. */
++  access_count?: number;
++  last_access_time?: string | null;
+ }
+ 
+ /** FTS5 search result for L0 records. */
+@@ -618,9 +628,15 @@ export class VectorStore implements IMemoryStore {
+     // running the DELETE. That is not a lost row: it is already out of the recall
+     // set, and the unfiltered delete path still removes it. A caller that reads false
+     // as "it is still there, keep trying" would be reading this wrong.
++    //
++    // access_count / last_access_time come along because the retention re-rank in
++    // tools/memory-search.ts needs them to date a record. The view is `SELECT *`,
++    // so the columns are already there; leaving them out of this list is what
++    // makes the re-rank a no-op (coverage 0 → age term off, no error).
+     this.stmtGetMeta = this.db.prepare(`
+       SELECT content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id,
+-             version, timestamp_str, timestamp_start, timestamp_end, metadata_json
++             version, timestamp_str, timestamp_start, timestamp_end, metadata_json,
++             access_count, last_access_time
+       FROM l1_recallable WHERE record_id = ?
+     `);
+ 
+@@ -1082,6 +1098,12 @@ export class VectorStore implements IMemoryStore {
+                f.session_key, f.session_id, f.team_id, f.task_id, f.user_id, f.agent_id, f.version,
+                f.timestamp_str, f.timestamp_start, f.timestamp_end,
+                f.metadata_json,
++               -- Retention signals live on l1_records, not in the FTS index (they
++               -- change on every hit; re-indexing text for them would be waste).
++               -- The JOIN below is already paid for the state filter, so these two
++               -- columns are free here — and required: without them the FTS half of
++               -- a hybrid result set arrives with coverage 0.
++               m.access_count, m.last_access_time,
+                bm25(l1_fts) AS rank
+         FROM l1_fts f
+         JOIN l1_records m ON m.record_id = f.record_id
+@@ -1477,6 +1499,8 @@ export class VectorStore implements IMemoryStore {
+               timestamp_start: string;
+               timestamp_end: string;
+               metadata_json: string;
++              access_count: number | null;
++              last_access_time: string | null;
+             }
+           | undefined;
+ 
+@@ -1512,6 +1536,8 @@ export class VectorStore implements IMemoryStore {
+           user_id: meta.user_id ?? "",
+           agent_id: meta.agent_id ?? "",
+           metadata_json: meta.metadata_json,
++          access_count: meta.access_count ?? 0,
++          last_access_time: meta.last_access_time ?? null,
+         });
+       }
+ 
+@@ -3117,6 +3143,8 @@ export class VectorStore implements IMemoryStore {
+         timestamp_start: string;
+         timestamp_end: string;
+         metadata_json: string;
++        access_count: number | null;
++        last_access_time: string | null;
+         rank: number;
+       }>;
+ 
+@@ -3141,6 +3169,8 @@ export class VectorStore implements IMemoryStore {
+           user_id: r.user_id ?? "",
+           agent_id: r.agent_id ?? "",
+           metadata_json: r.metadata_json,
++          access_count: r.access_count ?? 0,
++          last_access_time: r.last_access_time ?? null,
+         }));
+     } catch (err) {
+       this.logger?.warn(
+diff --git a/MemoryCore/src/core/store/types.ts b/MemoryCore/src/core/store/types.ts
+index 3c01dc0..d13ec83 100644
+--- a/MemoryCore/src/core/store/types.ts
++++ b/MemoryCore/src/core/store/types.ts
+@@ -72,6 +72,14 @@ export interface L1SearchResult {
+   user_id: string;
+   agent_id: string;
+   metadata_json: string;
++  /**
++   * Retention signals, mirroring the columns 0101 adds to `l1_records`.
++   * Optional because backends that cannot supply them (or an older schema) must
++   * keep compiling; a search path that leaves them undefined reads as "no
++   * evidence of use", which switches the age term off instead of guessing.
++   */
++  access_count?: number;
++  last_access_time?: string | null;
+ }
+ 
+ /** Result from an L1 FTS keyword search. */
+@@ -94,6 +102,9 @@ export interface L1FtsResult {
+   user_id: string;
+   agent_id: string;
+   metadata_json: string;
++  /** Retention signals — see L1SearchResult. */
++  access_count?: number;
++  last_access_time?: string | null;
+ }
+ 
+ /** Filter options for querying L1 records. */
+diff --git a/MemoryCore/src/core/tdai-core.ts b/MemoryCore/src/core/tdai-core.ts
+index ef10962..a6c9bcd 100644
+--- a/MemoryCore/src/core/tdai-core.ts
++++ b/MemoryCore/src/core/tdai-core.ts
+@@ -29,7 +29,7 @@ import type {
+   MemorySearchParams,
+   ConversationSearchParams,
+ } from "./types.js";
+-import type { MemoryTdaiConfig } from "../config.js";
++import { recallDecaySettings, type MemoryTdaiConfig } from "../config.js";
+ import type { IMemoryStore } from "./store/types.js";
+ import type { EmbeddingService } from "./store/embedding.js";
+ import type { StorageAdapter } from "./storage/adapter.js";
+@@ -457,6 +457,10 @@ export class TdaiCore {
+       vectorStore: this.vectorStore,
+       embeddingService: this.embeddingService,
+       logger: this.logger,
++      // Undefined unless `memory.recall.decay.enabled` is true — see the gate in
++      // recallDecaySettings(). Passing an object unconditionally would change
++      // the ranking of every existing install on upgrade.
++      decay: recallDecaySettings(this.cfg.recall),
+     });
+ 
+     return {
+diff --git a/MemoryCore/src/core/tools/l1-candidate-recall.ts b/MemoryCore/src/core/tools/l1-candidate-recall.ts
+index 2b9dedc..1a7f789 100644
+--- a/MemoryCore/src/core/tools/l1-candidate-recall.ts
++++ b/MemoryCore/src/core/tools/l1-candidate-recall.ts
+@@ -148,6 +148,12 @@ function toL1Hit(r: L1SearchResult | L1FtsResult): L1SearchResult {
+     user_id: r.user_id,
+     agent_id: r.agent_id,
+     metadata_json: r.metadata_json,
++    // Carried through, not consumed here: the retention re-rank happens in
++    // memory-search.ts, on the filtered set. This mapping only has to stop the
++    // fields from being dropped on the way — dropping them is indistinguishable
++    // from "no access history", which disables aging without an error.
++    access_count: r.access_count,
++    last_access_time: r.last_access_time,
+   };
+ }
+ 
+diff --git a/MemoryCore/src/core/tools/memory-search.ts b/MemoryCore/src/core/tools/memory-search.ts
+index 77858a2..ace1848 100644
+--- a/MemoryCore/src/core/tools/memory-search.ts
++++ b/MemoryCore/src/core/tools/memory-search.ts
+@@ -13,6 +13,12 @@
+ import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/types.js";
+ import { hasClientEmbedding, type EmbeddingService } from "../store/embedding.js";
+ import type { Logger } from "../types.js";
++import {
++  DEFAULT_DECAY_SETTINGS,
++  rerankCandidates,
++  trackingCoverageOf,
++  type DecaySettings,
++} from "../record/l1-decay.js";
+ import { recallL1Candidates } from "./l1-candidate-recall.js";
+ 
+ // ============================
+@@ -33,6 +39,13 @@ export interface MemorySearchResultItem {
+   version: number;
+   created_at: string;
+   updated_at: string;
++  /**
++   * Retention signals (see the forgetting columns in 0101). Absent when the
++   * store does not carry them — the re-rank reads absence as "no evidence of
++   * use", so a chain that drops these fields silently disables aging.
++   */
++  access_count?: number;
++  last_access_time?: string | null;
+ }
+ 
+ export interface MemorySearchResult {
+@@ -60,6 +73,8 @@ function toSearchItem(r: L1SearchResult): MemorySearchResultItem {
+     version: r.version ?? 0,
+     created_at: r.timestamp_start,
+     updated_at: r.timestamp_end,
++    access_count: r.access_count ?? 0,
++    last_access_time: r.last_access_time ?? null,
+   };
+ }
+ 
+@@ -84,6 +99,12 @@ export async function executeMemorySearch(params: {
+   vectorStore?: IMemoryStore;
+   embeddingService?: EmbeddingService;
+   logger?: Logger;
++  /**
++   * Retention decay settings. Absent means "rank on relevance alone", which is
++   * the behaviour of every caller that has not opted in — and the default for
++   * every install that does not set `memory.recall.decay`.
++   */
++  decay?: DecaySettings;
+ }): Promise<MemorySearchResult> {
+   const {
+     query,
+@@ -94,6 +115,7 @@ export async function executeMemorySearch(params: {
+     vectorStore,
+     embeddingService,
+     logger,
++    decay,
+   } = params;
+ 
+   logger?.debug?.(
+@@ -157,6 +179,31 @@ export async function executeMemorySearch(params: {
+     logger?.debug?.(`${TAG} After scene filter "${sceneFilter}": ${results.length}/${preFilterCount}`);
+   }
+ 
++  // ── Retention re-rank, then trim ──
++  // The over-retrieval above (candidateK = limit * 3) is what gives the re-rank
++  // room to work: without it, decay could only permute records that already fit
++  // in the answer. The re-rank runs here, after the type/scene filters and before
++  // the trim, because the multiplier is only meaningful on the set that is
++  // actually being ranked — narrowing first keeps the candidate window from
++  // being spent on types the caller excluded, and keeps the coverage denominator
++  // equal to "the records we are about to order".
++  //
++  // Cold start: when too few candidates carry access history, aging is switched
++  // off for the whole set (rather than per record) and the log says so. Two
++  // policies in one ranking would produce an order that means nothing.
++  if (decay) {
++    const coverage = trackingCoverageOf(results);
++    const decayOn = coverage >= (decay.minTrackingCoverage ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage);
++    logger?.debug?.(
++      `${TAG} [decay] candidates=${results.length}, coverage=${(coverage * 100).toFixed(0)}%, ` +
++        `decay=${decayOn ? "on" : "off (cold start)"}`,
++    );
++    results = rerankCandidates(results, decay).map(({ candidate, outcome }) => ({
++      ...candidate,
++      score: outcome.reportedScore,
++    }));
++  }
++
+   const trimmed = results.slice(0, limit);
+ 
+   logger?.debug?.(
+diff --git a/MemoryCore/src/gateway/server.ts b/MemoryCore/src/gateway/server.ts
+index 4324959..9f02361 100644
+--- a/MemoryCore/src/gateway/server.ts
++++ b/MemoryCore/src/gateway/server.ts
+@@ -23,6 +23,7 @@ import dayjs from "dayjs";
+ import { TdaiCore } from "../core/tdai-core.js";
+ import { StandaloneHostAdapter } from "../adapters/standalone/host-adapter.js";
+ import { loadGatewayConfig, parseBrokers } from "./config.js";
++import { recallDecaySettings } from "../config.js";
+ import type { GatewayConfig, GatewayConfigOverrides } from "./config.js";
+ import { dbChoiceToStoreConfigs, LocalBackendResolver } from "../core/backend-selection/index.js";
+ import type { BackendResolver } from "../core/backend-selection/index.js";
+@@ -1065,6 +1066,11 @@ export class TdaiGateway {
+         stateBackend: this.stateBackend ?? undefined,
+         pipelineWorker: this.pipelineWorker ?? undefined,
+         logger: this.logger,
++        // Retention re-rank switch. Resolved per call from the same
++        // MemoryTdaiConfig TdaiCore got at :411, so there is one config read for
++        // both search callers (MCP tool + HTTP) and no second source of truth.
++        // Returns undefined unless memory.recall.decay.enabled is true.
++        getDecaySettings: () => recallDecaySettings(this.config.memory.recall),
+         // `V3_STRICT_ISOLATION` controls only /v3 L0–L3 memory data-plane
+         // strictness. Default OFF for local/integration; production should set it.
+         v3StrictIsolation: resolveV3StrictIsolation(),
+diff --git a/MemoryCore/src/gateway/v2-router.ts b/MemoryCore/src/gateway/v2-router.ts
+index 4d07d0d..24aa66f 100644
+--- a/MemoryCore/src/gateway/v2-router.ts
++++ b/MemoryCore/src/gateway/v2-router.ts
+@@ -25,6 +25,7 @@ import type { Logger } from "../core/types.js";
+ import type { IStateBackend } from "../core/state/types.js";
+ import type { PipelineWorker } from "../services/pipeline-worker.js";
+ import { executeMemorySearch } from "../core/tools/memory-search.js";
++import type { DecaySettings } from "../core/record/l1-decay.js";
+ import { executeConversationSearch } from "../core/tools/conversation-search.js";
+ import type { MemoryRecord } from "../core/record/l1-writer.js";
+ import { reportRecallMetrics } from "../core/report/metric-tracking-recall.js";
+@@ -226,6 +227,16 @@ export interface V2RouterDeps {
+   getEmbedding: () => EmbeddingService | undefined;
+   /** Get the default StorageAdapter (standalone fallback). */
+   getStorage: () => StorageAdapter | undefined;
++  /**
++   * Retention decay settings for L1 search, or undefined when the re-rank is off.
++   *
++   * A getter rather than a value so the router never holds a stale copy: the
++   * gateway config is read once at startup but tests and embedded hosts build
++   * deps per call. Optional so every existing construction site (and the router
++   * tests' mocks) keep compiling — an absent getter means "no re-rank", which is
++   * exactly the pre-0103 behaviour.
++   */
++  getDecaySettings?: () => DecaySettings | undefined;
+   logger: Logger;
+ 
+   /**
+@@ -1225,6 +1236,10 @@ async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId:
+     vectorStore: deps.getStore(),
+     embeddingService: deps.getEmbedding(),
+     logger: deps.logger,
++    // Undefined unless `memory.recall.decay.enabled` is true (see
++    // recallDecaySettings); the getter is optional so an unwired host keeps the
++    // relevance-only ordering.
++    decay: deps.getDecaySettings?.(),
+   });
+   const recallLatencyMs = performance.now() - tStart;
+ 

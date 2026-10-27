@@ -1,0 +1,50 @@
+diff --git a/MemoryCore/src/core/store/sqlite/memory-store.ts b/MemoryCore/src/core/store/sqlite/memory-store.ts
+index 4a6f575..c9d6c3a 100644
+--- a/MemoryCore/src/core/store/sqlite/memory-store.ts
++++ b/MemoryCore/src/core/store/sqlite/memory-store.ts
+@@ -499,7 +499,12 @@ export class VectorStore implements IMemoryStore {
+         timestamp_end TEXT DEFAULT '',
+         created_time TEXT DEFAULT '',
+         updated_time TEXT DEFAULT '',
+-        metadata_json TEXT DEFAULT '{}'
++        metadata_json TEXT DEFAULT '{}',
++        state TEXT NOT NULL DEFAULT 'active',
++        access_count INTEGER NOT NULL DEFAULT 0,
++        last_access_time TEXT DEFAULT NULL,
++        forget_reason TEXT DEFAULT NULL,
++        forgotten_time TEXT DEFAULT NULL
+       )
+     `);
+ 
+@@ -510,6 +515,15 @@ export class VectorStore implements IMemoryStore {
+     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
+     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
+     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
++    // Forgetting columns. A record has to be able to leave the recall set without
++    // being deleted (provenance), and "use it or lose it" needs a record of use —
++    // without access_count, the only available age signal is updated_time, which
++    // every dedup merge refreshes.
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN state TEXT NOT NULL DEFAULT 'active'"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN last_access_time TEXT DEFAULT NULL"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN forget_reason TEXT DEFAULT NULL"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN forgotten_time TEXT DEFAULT NULL"); } catch { /* exists */ }
+     this.db.prepare("UPDATE l1_records SET team_id = ? WHERE team_id = '' OR team_id IS NULL").run(DEFAULT_ISOLATION_ID);
+     this.db.prepare("UPDATE l1_records SET user_id = ? WHERE user_id = '' OR user_id IS NULL").run(DEFAULT_ISOLATION_ID);
+     this.db.prepare("UPDATE l1_records SET agent_id = ? WHERE agent_id = '' OR agent_id IS NULL").run(DEFAULT_ISOLATION_ID);
+@@ -533,6 +547,15 @@ export class VectorStore implements IMemoryStore {
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_agent_session ON l1_records(user_id, agent_id, session_id)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_updated  ON l1_records(user_id, updated_time)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_agent_updated ON l1_records(agent_id, updated_time)");
++    // Forgetting indexes: the recall view filters on state, the planner sorts with
++    // the access columns, and audit queries scan by state.
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_state ON l1_records(state)");
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_last_access ON l1_records(last_access_time)");
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_access_count ON l1_records(access_count)");
++    // One place defines "recallable". Five query sites each carrying state = 'active'
++    // is how a codebase ends up with six definitions of the same word.
++    this.db.exec("DROP VIEW IF EXISTS l1_recallable");
++    this.db.exec("CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active'");
+ 
+     // Vector virtual table (cosine distance) — only created when dimensions > 0.
+     // When provider="none", dimensions=0 and vec0 tables are deferred until a

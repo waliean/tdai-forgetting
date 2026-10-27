@@ -1,0 +1,125 @@
+diff --git a/MemoryCore/src/core/store/sqlite/memory-store.ts b/MemoryCore/src/core/store/sqlite/memory-store.ts
+index c9d6c3a..c0ffaec 100644
+--- a/MemoryCore/src/core/store/sqlite/memory-store.ts
++++ b/MemoryCore/src/core/store/sqlite/memory-store.ts
+@@ -604,10 +604,24 @@ export class VectorStore implements IMemoryStore {
+     }
+     this.stmtDeleteMeta = this.db.prepare("DELETE FROM l1_records WHERE record_id = ?");
+ 
++    // Reads go through the view so an archived record's vector stops producing a hit.
++    // searchL1Vector already skips a hit whose metadata is missing (it logs "vector
++    // but NO metadata (orphan)"), so this degrades into "skipped", not "half-filled".
++    //
++    // Depends on 0101-l1-forgetting-schema.patch: `l1_recallable` is the view that
++    // patch creates (SELECT * FROM l1_records WHERE state = 'active'). Without it this
++    // statement fails to prepare, which is why 0102 must be applied on top of 0101.
++    //
++    // Side effect, and it is one: this statement also backs the isolation check in
++    // deleteL1 / deleteL1Batch. For a row that is already archived the lookup now
++    // returns undefined, so a *filtered* delete reports false / skips instead of
++    // running the DELETE. That is not a lost row: it is already out of the recall
++    // set, and the unfiltered delete path still removes it. A caller that reads false
++    // as "it is still there, keep trying" would be reading this wrong.
+     this.stmtGetMeta = this.db.prepare(`
+       SELECT content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id,
+              version, timestamp_str, timestamp_start, timestamp_end, metadata_json
+-      FROM l1_records WHERE record_id = ?
++      FROM l1_recallable WHERE record_id = ?
+     `);
+ 
+     if (this.dimensions > 0) {
+@@ -1015,14 +1029,63 @@ export class VectorStore implements IMemoryStore {
+ 
+       this.stmtL1FtsDelete = this.db.prepare("DELETE FROM l1_fts WHERE record_id = ?");
+ 
++      // The JOIN onto l1_records is what makes archiving effective on the FTS path.
++      // l1_fts is a separate table: nothing removes a row from it when a record is
++      // archived, so without this filter a forgotten record stays retrievable. Today
++      // the candidate window happens to hide it (measured: an archived record landed
++      // at BM25 rank 188 for a common token), which is a coincidence of term
++      // frequency, not a guarantee.
++      //
++      // FTS5 constraint, learned the hard way: the left operand of MATCH and the
++      // argument of bm25() must be the virtual table name (`l1_fts`), not the alias.
++      // Writing `bm25(f)` or `f MATCH ?` fails to prepare with "no such column: f".
++      //
++      // Depends on 0101-l1-forgetting-schema.patch: `m.state` is the column that patch
++      // adds to l1_records; against an unpatched schema this prepare throws "no such
++      // column: m.state". Prepare runs inside initSchema, so a missing dependency is
++      // fatal rather than local — 0102 applied alone to the frozen baseline (measured)
++      // makes init() return "schema init failed: …" with degraded=true. In practice
++      // the statement above fails first on the missing view, which makes 0101 both a
++      // prerequisite for that query and the reason this one can prepare at all.
++      //
++      // Cost, old layout (MemoryCore/src/core/store/sqlite.ts, 822-record corpus):
++      // first query after a cold cache 0.42 ms → 2.45 ms, subsequent queries
++      // +0.1–0.2 ms.
++      //
++      // Cost, current layout (sqlite/memory-store.ts, same 822-record
++      // data/snapshot-20261026.db corpus, 5 tokens × 20 runs × 3 passes, LIMIT 20):
++      // All three rows below were measured on a bare DatabaseSync connection: none of
++      // the PRAGMAs the production VectorStore constructor sets unconditionally were
++      // applied (busy_timeout 5000, journal_mode WAL, cache_size -65536, mmap_size
++      // 134217728, see the PRAGMA block in this file), so they overstate what a real
++      // deployment pays. With those four PRAGMAs in place the production median ratio is
++      // roughly 1.4–2.2x: independent measurements on this corpus span 1.41–2.13x, and a
++      // rerun here measured 1.59–1.73x over 5 rounds. The tail is wider still: p95 ran
++      // 2.2–2.9x across those runs. Quote the median range, not these numbers, as the
++      // production cost. The absolute milliseconds move with machine load either way.
++      //   warm connection (one prepare, reused statement, page cache warm):
++      //     median 0.34 → 0.87 ms, p95 0.64 → 2.62 ms
++      //     with the production PRAGMAs the warm median is about 0.30 → 0.49 ms
++      //     (5 rounds × 5 passes; per round 0.285–0.319 → 0.479–0.513 ms)
++      //   cold connection (fresh DatabaseSync + fresh prepare per sample):
++      //     median 0.51 → 1.69 ms, p95 0.99 → 3.62 ms
++      //   cold page cache (PRAGMA cache_size = 0, mmap off, forced re-read):
++      //     median 1.07 → 2.66 ms, p95 2.79 → 8.85 ms
++      //     This row is a pressure lower bound, not a production shape: the constructor
++      //     always turns mmap on, so a cold page cache is unreachable in production.
++      // The extra cost is one primary-key probe of l1_records per FTS hit; the query
++      // plan confirms "SEARCH m USING INDEX sqlite_autoindex_l1_records_1
++      // (record_id=?)". It scales with the retrieve window (LIMIT 100, warm: median
++      // 1.09 → 1.48 ms), not with table size.
+       this.stmtL1FtsSearch = this.db.prepare(`
+-        SELECT record_id, content_original AS content, type, priority, scene_name,
+-               session_key, session_id, team_id, task_id, user_id, agent_id, version,
+-               timestamp_str, timestamp_start, timestamp_end,
+-               metadata_json,
++        SELECT f.record_id, f.content_original AS content, f.type, f.priority, f.scene_name,
++               f.session_key, f.session_id, f.team_id, f.task_id, f.user_id, f.agent_id, f.version,
++               f.timestamp_str, f.timestamp_start, f.timestamp_end,
++               f.metadata_json,
+                bm25(l1_fts) AS rank
+-        FROM l1_fts
+-        WHERE l1_fts MATCH ?
++        FROM l1_fts f
++        JOIN l1_records m ON m.record_id = f.record_id
++        WHERE l1_fts MATCH ? AND m.state = 'active'
+         ORDER BY rank ASC
+         LIMIT ?
+       `);
+@@ -1076,6 +1139,12 @@ export class VectorStore implements IMemoryStore {
+     // L1 query statements (for l1-reader)
+     // user_id / agent_id surfaced in every L1 read so callers (router /
+     // candidate-pool / l1-reader) can enforce isolation downstream.
++    //
++    // These still read `l1_records`, not `l1_recallable`, deliberately. They feed L2
++    // scene generation, which has to see the history: a scene summarises what
++    // happened in a session, and a forgotten record is still part of what happened.
++    // Filtering here would make a scene change retroactively as memories decay. The
++    // forgetting filter belongs on the recall path, not on the history path.
+     const l1QueryCols = `record_id, content, type, priority, scene_name, session_key, session_id,
+       team_id, task_id, user_id, agent_id, version,
+       timestamp_str, timestamp_start, timestamp_end,
+@@ -3221,6 +3290,11 @@ export class VectorStore implements IMemoryStore {
+ 
+       // Read all L1 records from metadata table.
+       // Include user_id / agent_id so the rebuilt FTS rows carry isolation info.
++      // The full-table read (including forgotten rows) is intentional: this rebuilds
++      // the index, it does not query it. An FTS row for a forgotten record is inert,
++      // because 0102's JOIN filters it out at retrieval time; dropping it here would
++      // instead guarantee it stays unfindable after a restore. Keeping rebuild and
++      // filter separate means `state` is the single place that decides visibility.
+       const l1Rows = this.db
+         .prepare(`
+           SELECT record_id, content, type, priority, scene_name,
