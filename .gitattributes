@@ -1,0 +1,4 @@
+# Patches are byte-exact artifacts. git apply rejects a patch whose context
+# lines carry CRLF, and core.autocrlf=true would rewrite them on checkout, so
+# mark them binary-equivalent: no EOL conversion in either direction.
+*.patch -text
