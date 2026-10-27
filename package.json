@@ -14,7 +14,8 @@
     "test": "node --test test/*.test.ts",
     "test:watch": "node --test --watch test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "bench": "node bench/run-bench.ts"
+    "bench": "node bench/run-bench.ts",
+    "rollback": "node scripts/rollback-forgetting.mjs"
   },
   "files": [
     "src/",

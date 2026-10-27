@@ -6,7 +6,7 @@ Node ≥ 22.18。用内置 `node:sqlite` 和 `node --test`，不装数据库驱�
 
 ```bash
 npm install
-npm test        # 103 个测试
+npm test        # 118 个测试
 npm run typecheck
 ```
 
@@ -25,7 +25,7 @@ TypeScript 由 Node 直接跑（type stripping），`tsc` 只负责类型检查�
 
 改打分公式、pin 规则、冗余阈值，请连带更新 `bench/` 里的对照实验，并在 PR 里贴前后数字。理由：这些参数的效果不能靠推理判断，只能测。已有的五个实验覆盖了检索质量、冷启动、过期结论、冗余合并、pin 策略。
 
-改 `src/l1-decay.ts` 必须同时跑 `tests/equivalence.test.ts`。这个文件是原样拷进 MemoryCore 的那份，和 `src/scoring.ts` 是两份实现；等价测试是防止它们漂移的唯一手段。
+改 `src/l1-decay.ts` 必须同时跑 `test/equivalence.test.ts`。这个文件是原样拷进 MemoryCore 的那份，和 `src/scoring.ts` 是两份实现；等价测试是防止它们漂移的唯一手段。
 
 ## 数据
 

@@ -113,7 +113,7 @@ export function resolvePin(record: MemoryRecord, opts: PinOptions = DEFAULT_PIN_
  * The scorer needs this answer on its own: the shipped patch (src/l1-decay.ts)
  * derives the pin from `priority === -1` directly, and if the engine's version only
  * honoured a pre-computed flag, the two would disagree on exactly the records that
- * matter most. tests/equivalence.test.ts is what caught that.
+ * matter most. test/equivalence.test.ts is what caught that.
  */
 export function isHardPinned(record: MemoryRecord): boolean {
   if (record.pin_kind === "hard") return true;

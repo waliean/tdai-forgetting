@@ -62,6 +62,65 @@ test("apply moves records to archive/retire and writes one audit row each", () =
   }
 });
 
+/**
+ * The rollback runbook decides which rows a run may restore by comparing
+ * (state, forget_reason, forgotten_time) on l1_records with (to_state, reason,
+ * decided_at) on the audit row. That comparison is only sound while the applier
+ * writes all three fields from the same audit row in the same transaction, and
+ * nothing else in the suite pins that: a silent change here would not fail any
+ * other test, it would just make every rollback restore zero rows.
+ */
+test("archiving writes (state, forget_reason, forgotten_time) that match the audit row", () => {
+  const db = createTempDb();
+  try {
+    const records = [
+      makeRecord({ record_id: "a", updated_time: "2026-01-01T00:00:00.000Z", priority: 95 }),
+      makeRecord({ record_id: "b", updated_time: "2026-01-01T00:00:00.000Z", priority: 96 }),
+      makeRecord({ record_id: "keep", updated_time: "2026-10-25T00:00:00.000Z", priority: 99 }),
+    ];
+    insertRecords(db.path, records);
+    const plan = freshPlan(records);
+    const result = applyPlan(db.path, plan, { notes: "fingerprint pin" });
+    assert.ok(result.auditRows >= 2, "fixture should archive or retire something");
+
+    const db2 = new DatabaseSync(db.path, { readOnly: true });
+    try {
+      const rows = db2
+        .prepare(
+          `SELECT a.record_id, a.action, a.to_state, a.reason, a.decided_at,
+                  r.state, r.forget_reason, r.forgotten_time
+             FROM forgetting_audit a
+             JOIN l1_records r ON r.record_id = a.record_id
+            WHERE a.run_id = ?`,
+        )
+        .all(result.runId) as unknown as Array<{
+        record_id: string;
+        action: string;
+        to_state: string;
+        reason: string;
+        decided_at: string;
+        state: string;
+        forget_reason: string | null;
+        forgotten_time: string | null;
+      }>;
+
+      assert.ok(rows.length >= 2);
+      const unchanged = rows.filter((r) => r.state === "active");
+      assert.equal(unchanged.length, 0, "every plan target here is writable, none should stay active");
+
+      for (const row of rows) {
+        assert.equal(row.state, row.to_state, `state must equal to_state for ${row.record_id}`);
+        assert.equal(row.forget_reason, row.reason, `forget_reason must equal the audit reason for ${row.record_id}`);
+        assert.equal(row.forgotten_time, row.decided_at, `forgotten_time must equal decided_at for ${row.record_id}`);
+      }
+    } finally {
+      db2.close();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
 test("dry run writes nothing at all", () => {
   const db = createTempDb();
   try {
