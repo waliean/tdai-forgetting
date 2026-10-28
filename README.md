@@ -10,9 +10,9 @@
 
 改动落在三处：存储 schema（加列）、检索排序（改打分）、清理策略（新增）。三处都有回滚成本，而 tdai 上游把"基于策略的批量遗忘"明确列为 out of scope。所以先进独立仓库，出补丁、跑数据、拿对照结果，再决定回灌。
 
-代码不复制 upstream，只做两件事：一是给出可以合并进去的补丁（`patches/`，四份），二是把补丁里那个纯函数原样放在 `src/l1-decay.ts`，跑测试的就是将来上线的那个文件。
+代码不复制 upstream，只做两件事：一是给出可以合并进去的补丁（`patches/`，可用的是 0101–0104），二是把补丁里那个纯函数原样放在 `src/l1-decay.ts`（访问日志模块同理放在 `src/recall.ts`，0104 里带的是这两份的逐一对应副本），跑测试的就是将来上线的那个文件。
 
-补丁的验证基线要写清楚：四份补丁在本地检出 `5299c00` 上依次 `git apply` 成功、`build:plugin` 通过、容器内冒烟通过。但那份树已经不是上游现状——在新的上游基线 `084bed45` 上逐份 `git apply --check`，只有纯新增的 0002 能过，0001/0003/0004 全部失败（上游把 `store/sqlite.ts` 重构成了 `store/sqlite/` 目录）。按新布局的重做由画布 `patch-rebase`（R0–R3）承接，本文所有"已验证"都指旧基线。基线的选定依据见 [基线锁定](docs/design/基线锁定-2026-10-27.md)。
+补丁的验证基线要写清楚：旧的 0001–0004 四份补丁在本地检出 `5299c00` 上依次 `git apply` 成功、`build:plugin` 通过、容器内冒烟通过。但那份树已经不是上游现状——在新的上游基线 `084bed45` 上逐份 `git apply --check`，只有纯新增的 0002 能过，0001/0003/0004 全部失败（上游把 `store/sqlite.ts` 重构成了 `store/sqlite/` 目录）。按新布局的重做由画布 `patch-rebase`（R0–R3）承接，本文所有"已验证"都指旧基线。基线的选定依据见 [基线锁定](docs/design/基线锁定-2026-10-27.md)。
 
 补丁验证过程里发现了一个真缺陷：归档只改 `l1_records.state`，`l1_fts` 里的行还在，所以记录归档后仍能被召回。视图挡不住——两条检索路径根本不读视图。修法与实测见 [补丁落地验证](docs/design/补丁落地验证-2026-10-26.md)。
 
@@ -24,7 +24,7 @@
 git clone https://github.com/<owner>/tdai-forgetting
 cd tdai-forgetting
 npm install
-npm test                      # 118 个测试，Node 内置 test runner
+npm test                      # 147 个测试，Node 内置 test runner
 ```
 
 对着你自己的 tdai 数据库跑（只读，不会写任何东西）：
@@ -142,14 +142,15 @@ state: active | archived | retired | deleted
 ## 目录
 
 ```
-src/                 遗忘引擎（打分 / pin / 冗余 / 计划 / 落库 / 访问日志）
+src/                 遗忘引擎（打分 / pin / 冗余 / 计划 / 落库 / 访问日志 / 覆盖率观测）
 src/l1-decay.ts      原样放进 MemoryCore 的纯函数，测试的就是上线的这份
-patches/             回灌 upstream 的四份补丁（在 5299c00 上验证过；上游新布局上 3/4 应用不了，重做见画布 patch-rebase）
+patches/             回灌 upstream 的补丁：0101–0103 按新布局重做（叠在 084bed45 上），0104 是访问追踪接线；旧的 0001–0004 留在原处只作历史证据
 bench/               对照实验（合成语料、真实快照、受控过期语料）
-test/                118 个测试，node --test
+test/                147 个测试，node --test
 docs/research/       业界遗忘机制调研
 docs/design/         缺口诊断与方案设计
 docs/experiments/    实测报告
+docs/status/         各阶段收口与交接记录
 ```
 
 ## 边界与已知问题
@@ -163,7 +164,7 @@ docs/experiments/    实测报告
 - **容器内冒烟已做**（A4，通过 REV-001）。临时容器指向 `VACUUM INTO` 副本、换端口 8421、6.3 秒 healthy，`/v3/atomic/search` 返回 5 条，把排第一的记录归档后同一 query 仍 5 条且不含该 id（候选窗口回填到满），`docker logs` 里 error 级 0 条。证据与逐项数字在[补丁落地验证](docs/design/补丁落地验证-2026-10-26.md)第八节。
 - **回退演练只覆盖补丁树**。[回退演练指南](docs/guides/回退演练-2026-10-26.md) 记录了两遍副本上的完整回退：停容器 → 改库 → checkpoint → 起容器，从停容器到召回返回 **6.5 秒 / 13.9 秒**（验收线 300 秒，差异几乎全在容器起停），52 条归档记录全部恢复、同一 query 的召回逐条与归档前一致，"不改历史审计、不删列"也都实测过。回退逻辑是 `scripts/rollback-forgetting.mjs`（带指纹判定，不是文档里的 SQL 片段）。但演练用的是打过补丁的那棵树，生产在跑的是目录式 `store/sqlite/` 那一代代码——**这不等于"回退已验证"**，上线前需要同口径再演一次。
 - **没有自动调度**。第一版故意只提供命令，不提供定时任务。阈值应该先被人工审几轮再自动化。
-- **访问追踪需要改检索路径**。目前提供 append-only 日志 + 离线折叠（`src/recall.ts`），接进 gateway 的补丁没做——四份补丁里不包含它。
+- **访问追踪已接线，但只在补丁里，且默认开启。** append-only 日志 + 离线折叠在本仓库（`src/recall.ts`），接进 `executeMemorySearch` 的是 `patches/0104-l1-recall-telemetry.patch`（叠在 0101–0103 之上）。它把 `memory.recall.accessLog.enabled` 的默认值定为 `true`，等于给检索路径加一次同步追加写——实测约 +0.14ms（基线 1.02ms 的 13.6%），详见[访问追踪延迟](docs/experiments/访问追踪延迟-2026-10-26.md)。不想要这个开销就把 `enabled` 显式设为 `false`。
 - **只处理 L1**。L0 对话、L2 场景、L3 画像的淘汰策略不同，不在本次范围。
 - **shingle 相似度对长文本偏保守**。几百字以上的记录做 4-gram 比较会稀释相似度，阈值可能需要按长度分档。
 - **冷启动门槛 10% 是拍的**，只在两三份语料上验证过，样本不够。

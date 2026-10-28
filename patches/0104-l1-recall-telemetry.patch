@@ -1,0 +1,615 @@
+diff --git a/MemoryCore/index.ts b/MemoryCore/index.ts
+index e303304..3da4faf 100644
+--- a/MemoryCore/index.ts
++++ b/MemoryCore/index.ts
+@@ -23,7 +23,7 @@ import fs from "node:fs";
+ import { createRequire } from "node:module";
+ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+ import registerClientOpenClawPlugin from "./openclaw-plugin/index.js";
+-import { parseConfig } from "./src/config.js";
++import { parseConfig, recallAccessLogPath } from "./src/config.js";
+ import type { MemoryTdaiConfig } from "./src/config.js";
+ import { executeReadCos, READ_COS_TOOL_SCHEMA, READ_COS_TOOL_NAME, READ_COS_TOOL_DESCRIPTION } from "./src/core/tools/read-cos.js";
+ import { LocalStorageBackend } from "./src/core/storage/local-backend.js";
+@@ -274,7 +274,12 @@ export default function register(api: OpenClawPluginApi) {
+   // Resolve plugin data directory via runtime API (avoid importing internal paths directly)
+   const openclawStateDir = resolveOpenClawStateDir((api.runtime as any)?.state);
+   const pluginDataDir = path.join(openclawStateDir, "memory-tdai");
+-  initDataDirectories(pluginDataDir);
++  // Same third argument as TdaiCore's own init (tdai-core.ts) and the gateway's:
++  // the access log's parent. The compensating call inside TdaiCore made this
++  // omission invisible, but "two call sites happen to agree" is an invariant
++  // nobody enforces — a third startup path that skipped TdaiCore would search
++  // fine and never produce a log file.
++  initDataDirectories(pluginDataDir, undefined, recallAccessLogPath(cfg.recall, pluginDataDir));
+   api.logger.debug?.(`${TAG} Data dir: ${pluginDataDir} (all subdirectories initialized)`);
+ 
+   // ============================
+diff --git a/MemoryCore/src/config.ts b/MemoryCore/src/config.ts
+index e164c89..0aae036 100644
+--- a/MemoryCore/src/config.ts
++++ b/MemoryCore/src/config.ts
+@@ -11,6 +11,10 @@
+ // there is one definition of "30 days" rather than one per layer. That module
+ // imports nothing, so this stays a leaf dependency.
+ import { DEFAULT_DECAY_SETTINGS, type DecaySettings } from "./core/record/l1-decay.js";
++// The access log's path is resolved here, next to the data directory the log
++// lives under, rather than inside the search path — see recallAccessLogPath().
++import { DEFAULT_RECALL_LOG } from "./forgetting/recall.js";
++import { isAbsolute, join } from "node:path";
+ 
+ // ============================
+ // Type definitions
+@@ -142,6 +146,33 @@ export interface RecallDecayConfig {
+   minTrackingCoverage: number;
+ }
+ 
++/**
++ * Access-evidence log settings (`memory.recall.accessLog`).
++ *
++ * The log is the raw material for `access_count` / `last_access_time`, which the
++ * retention re-rank reads. It is on by default with a path under the data
++ * directory: a deployment that configures nothing still gets evidence, and a
++ * deployment that wants the file elsewhere (or not at all) says so.
++ */
++export interface RecallAccessLogConfig {
++  /**
++   * Record one JSON line per search (default: true). Off means no evidence is
++   * collected, and the re-rank's cold-start gate will never open on its own.
++   */
++  enabled: boolean;
++  /**
++   * Absolute path, or a path relative to the data directory. Default: the
++   * data-directory-relative `recall-access.jsonl`, so evidence lands with the
++   * rest of the instance's state instead of beside the process's cwd.
++   */
++  path?: string;
++  /**
++   * Only the first N hits of a search count as an access (default: 10, from
++   * DEFAULT_RECALL_LOG). Applied before the append, by `appendRecall` itself.
++   */
++  maxRankCounted: number;
++}
++
+ /** Recall settings — controls memory retrieval for context injection. */
+ export interface RecallConfig {
+   /** Enable auto-recall (default: true) */
+@@ -160,6 +191,8 @@ export interface RecallConfig {
+   timeoutMs: number;
+   /** Retention re-rank settings (default: disabled). */
+   decay: RecallDecayConfig;
++  /** Access-evidence log settings (default: enabled, under the data dir). */
++  accessLog: RecallAccessLogConfig;
+ }
+ 
+ /** Embedding service configuration for vector search. */
+@@ -530,6 +563,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
+   // Optional sub-group; `obj()` yields {} when absent, so a config written before
+   // this feature parses to "everything default", including enabled=false.
+   const recallDecayGroup = obj(recallGroup, "decay");
++  const recallAccessLogGroup = obj(recallGroup, "accessLog");
+ 
+   // --- Embedding ---
+   const embeddingGroup = obj(c, "embedding");
+@@ -745,6 +779,11 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
+         usageBoost: num(recallDecayGroup, "usageBoost") ?? DEFAULT_DECAY_SETTINGS.usageBoost,
+         minTrackingCoverage: num(recallDecayGroup, "minTrackingCoverage") ?? DEFAULT_DECAY_SETTINGS.minTrackingCoverage,
+       },
++      accessLog: {
++        enabled: bool(recallAccessLogGroup, "enabled") ?? true,
++        path: optStr(recallAccessLogGroup, "path"),
++        maxRankCounted: num(recallAccessLogGroup, "maxRankCounted") ?? DEFAULT_RECALL_LOG.maxRankCounted,
++      },
+     },
+     embedding: {
+       enabled: embeddingEnabled,
+@@ -890,6 +929,49 @@ export function recallDecaySettings(recall: RecallConfig): DecaySettings | undef
+   return numeric;
+ }
+ 
++/** The relative name used when `memory.recall.accessLog.path` is not set. */
++export const DEFAULT_RECALL_ACCESS_LOG_NAME = "recall-access.jsonl";
++
++/**
++ * Resolve the access log to an absolute path, or undefined when logging is off.
++ *
++ * Takes `dataDir` explicitly. `executeMemorySearch` does not have one and must
++ * not invent one — a relative path there would resolve against the process's
++ * cwd, which differs between the gateway, the CLI and the tests, so the same
++ * config would write to three different files. The caller that owns the data
++ * directory is the only place that can answer "where" correctly.
++ *
++ * A relative `path` is therefore joined to `dataDir`; an absolute one is used
++ * as-is (a deployment may put the log on a separate volume).
++ *
++ * This function does not create the parent directory. `appendFileSync` does not
++ * either, and a missing parent fails silently on every search — the symptom is
++ * a log file that never appears while search keeps working. Directory creation
++ * belongs to whoever prepares the data directory (`initDataDirectories`), once,
++ * not to the search path on every call.
++ */
++export function recallAccessLogPath(recall: RecallConfig, dataDir: string): string | undefined {
++  if (!recall.accessLog.enabled) return undefined;
++  const configured = recall.accessLog.path;
++  if (!configured) return join(dataDir, DEFAULT_RECALL_ACCESS_LOG_NAME);
++  return isAbsolute(configured) ? configured : join(dataDir, configured);
++}
++
++/**
++ * The rank window for `executeMemorySearch({ maxRankCounted })`, or undefined
++ * when logging is off.
++ *
++ * The companion of recallAccessLogPath, and gated the same way: a disabled log
++ * needs no window, and returning one anyway would hand the search path a value
++ * it can only ignore. Keeping both on this side means the two keys that describe
++ * the log are resolved by the function that owns the config, not re-derived at
++ * each call site — that is what left `maxRankCounted` parsed but unread.
++ */
++export function recallMaxRankCounted(recall: RecallConfig): number | undefined {
++  if (!recall.accessLog.enabled) return undefined;
++  return recall.accessLog.maxRankCounted;
++}
++
+ /**
+  * Normalize a cleanup time string.
+  *
+diff --git a/MemoryCore/src/core/tdai-core.ts b/MemoryCore/src/core/tdai-core.ts
+index a6c9bcd..c6a65af 100644
+--- a/MemoryCore/src/core/tdai-core.ts
++++ b/MemoryCore/src/core/tdai-core.ts
+@@ -29,7 +29,12 @@ import type {
+   MemorySearchParams,
+   ConversationSearchParams,
+ } from "./types.js";
+-import { recallDecaySettings, type MemoryTdaiConfig } from "../config.js";
++import {
++  recallAccessLogPath,
++  recallDecaySettings,
++  recallMaxRankCounted,
++  type MemoryTdaiConfig,
++} from "../config.js";
+ import type { IMemoryStore } from "./store/types.js";
+ import type { EmbeddingService } from "./store/embedding.js";
+ import type { StorageAdapter } from "./storage/adapter.js";
+@@ -256,7 +261,7 @@ export class TdaiCore {
+         `available: ${listDecisionProviders().join(", ")}`,
+       );
+     }
+-    initDataDirectories(this.dataDir);
++    initDataDirectories(this.dataDir, undefined, recallAccessLogPath(this.cfg.recall, this.dataDir));
+ 
+     // Initialize stores (async)
+     this.storeReady = this.initStores();
+@@ -461,6 +466,15 @@ export class TdaiCore {
+       // recallDecaySettings(). Passing an object unconditionally would change
+       // the ranking of every existing install on upgrade.
+       decay: recallDecaySettings(this.cfg.recall),
++      // Access evidence goes to the instance's data dir, resolved here because
++      // this is the layer that holds it. Undefined when disabled, which is also
++      // what an unwired host passes — no path, no I/O.
++      accessLogPath: recallAccessLogPath(this.cfg.recall, this.dataDir),
++      // The rank window travels with the path so the configured value actually
++      // reaches appendRecall; without it, maxRankCounted would be a config key
++      // that parses and does nothing. Resolved next to recallAccessLogPath so
++      // both keys of the log are read from one place.
++      maxRankCounted: recallMaxRankCounted(this.cfg.recall),
+     });
+ 
+     return {
+diff --git a/MemoryCore/src/core/tools/memory-search.ts b/MemoryCore/src/core/tools/memory-search.ts
+index ace1848..f0f16bd 100644
+--- a/MemoryCore/src/core/tools/memory-search.ts
++++ b/MemoryCore/src/core/tools/memory-search.ts
+@@ -20,6 +20,7 @@ import {
+   type DecaySettings,
+ } from "../record/l1-decay.js";
+ import { recallL1Candidates } from "./l1-candidate-recall.js";
++import { appendRecall, type RecallHit } from "../../forgetting/recall.js";
+ 
+ // ============================
+ // Types
+@@ -105,6 +106,25 @@ export async function executeMemorySearch(params: {
+    * every install that does not set `memory.recall.decay`.
+    */
+   decay?: DecaySettings;
++  /**
++   * Absolute path of the access-evidence log (one JSON line per search), or
++   * undefined to write none.
++   *
++   * Passed in rather than derived here: this function has no data directory and
++   * has no business inventing one — the caller that owns the data dir resolves
++   * the path (see recallAccessLogPath in config). Undefined is the correct
++   * default for embedded hosts and tests: no path, no I/O, no behaviour change.
++   */
++  accessLogPath?: string;
++  /**
++   * Only the first N hits of a search count as an access (see RecallLogOptions).
++   *
++   * Passed in for the same reason as accessLogPath: it comes from
++   * `memory.recall.accessLog.maxRankCounted`, and this function has no config.
++   * Absent leaves `appendRecall` on its own default (10), which is what an
++   * unwired host and every existing caller get.
++   */
++  maxRankCounted?: number;
+ }): Promise<MemorySearchResult> {
+   const {
+     query,
+@@ -116,6 +136,8 @@ export async function executeMemorySearch(params: {
+     embeddingService,
+     logger,
+     decay,
++    accessLogPath,
++    maxRankCounted,
+   } = params;
+ 
+   logger?.debug?.(
+@@ -211,6 +233,40 @@ export async function executeMemorySearch(params: {
+     `(scores: [${trimmed.map((r) => r.score.toFixed(3)).join(", ")}])`,
+   );
+ 
++  // ── Access evidence, recorded once per search ──
++  //
++  // One append per search, not one per hit: the log's unit is "a search
++  // returned these", and a per-hit append would trade one syscall for fifteen
++  // and let a torn line lose the rest of the list.
++  //
++  // It sits after the trim, not on the candidate pool, because rank means
++  // "position in the list the caller receives". Recording the over-retrieved
++  // candidates (candidateK = limit * 3) would hand an access vote to records
++  // that were never returned — that is "appeared in a list", not "was used".
++  //
++  // The call is also here rather than in recallL1Candidates because dedup
++  // shares that function (l1-dedup.ts): a sink at that level would count
++  // write-time lookups as use and inflate the evidence by the write volume
++  // (B1 decision doc §4). `r.id`, not `r.record_id` — toSearchItem above
++  // renamed the field, and the wrong name writes a garbage line silently.
++  //
++  // appendRecall never throws and returns false on failure; the result is
++  // deliberately dropped. A lost access record is cheaper than a failed search,
++  // and a warning per search would drown the log it is trying to protect.
++  // The rank window comes from the caller when it has one
++  // (`memory.recall.accessLog.maxRankCounted`); omitting it leaves appendRecall
++  // on DEFAULT_RECALL_LOG. It must not be re-hardcoded here: that is exactly how
++  // the config key became a value a deployment could set and nothing would read.
++  if (accessLogPath && trimmed.length > 0) {
++    const hits: RecallHit[] = trimmed.map((r, i) => ({ record_id: r.id, rank: i + 1 }));
++    appendRecall(
++      accessLogPath,
++      hits,
++      new Date(),
++      maxRankCounted === undefined ? undefined : { maxRankCounted },
++    );
++  }
++
+   return {
+     results: trimmed,
+     total: trimmed.length,
+diff --git a/MemoryCore/src/forgetting/recall.ts b/MemoryCore/src/forgetting/recall.ts
+new file mode 100644
+index 0000000..364129b
+--- /dev/null
++++ b/MemoryCore/src/forgetting/recall.ts
+@@ -0,0 +1,174 @@
++/**
++ * Recall evidence.
++ *
++ * Decay needs something to push against. Without a record of which memories were
++ * actually returned, every memory looks equally untouched and the only measurable
++ * signal is age — which is exactly the flaw in tdai's current cleaner (it keys on
++ * `updated_time`, and dedup merges refresh that forever).
++ *
++ * Two write paths, chosen for where they run:
++ *
++ *   appendRecall    one JSON line per search, fire-and-forget. For the in-process
++ *                   patch: the core already holds a WAL connection to the database,
++ *                   so a second writer on the search path buys contention for
++ *                   nothing. An append is cheap, ordered by the filesystem, and
++ *                   survives a crash mid-search.
++ *
++ *   foldAccessLog   reads those lines, aggregates per record, and updates the
++ *                   counters in one transaction. Runs off the hot path (cron or the
++ *                   CLI), which is also when contention is acceptable.
++ *
++ *   reinforce       direct bump for the stronger signal "the agent cited this".
++ */
++
++import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from "node:fs";
++import { DatabaseSync } from "node:sqlite";
++
++export interface RecallHit {
++  record_id: string;
++  /** 1-based position in the returned list. */
++  rank: number;
++}
++
++export interface RecallLogOptions {
++  /** Only the first N hits count as an access. Counting every candidate measures "appeared in a list", not "was useful". */
++  maxRankCounted: number;
++}
++
++export const DEFAULT_RECALL_LOG: RecallLogOptions = {
++  maxRankCounted: 10,
++};
++
++/**
++ * Append one line per search. Never throws: a lost access record is much cheaper
++ * than a failed search, and the caller cannot do anything useful with the error.
++ */
++export function appendRecall(
++  logPath: string,
++  hits: RecallHit[],
++  now: Date = new Date(),
++  opts: RecallLogOptions = DEFAULT_RECALL_LOG,
++): boolean {
++  const counted = hits.filter((h) => h.rank <= opts.maxRankCounted);
++  if (counted.length === 0) return false;
++  const line =
++    JSON.stringify({
++      at: now.toISOString(),
++      hits: counted.map((h) => h.record_id),
++    }) + "\n";
++  try {
++    appendFileSync(logPath, line, "utf8");
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++export interface FoldResult {
++  linesRead: number;
++  recordsTouched: number;
++  /** Rows actually updated; zero here with linesRead > 0 means the ids no longer exist. */
++  rowsUpdated: number;
++  archivePath?: string;
++}
++
++/**
++ * Fold the log into `l1_records.access_count` / `last_access_time`.
++ *
++ * The log is renamed rather than truncated after a successful fold: if the process
++ * dies between the rename and the commit, the un-folded data is still on disk under
++ * the archive name and can be replayed by hand. Truncation would lose it silently.
++ */
++export function foldAccessLog(dbPath: string, logPath: string): FoldResult {
++  if (!existsSync(logPath) || statSync(logPath).size === 0) {
++    return { linesRead: 0, recordsTouched: 0, rowsUpdated: 0 };
++  }
++
++  const lines = readFileSync(logPath, "utf8").split("\n").filter((l) => l.trim().length > 0);
++  const totals = new Map<string, { count: number; lastAt: string }>();
++  for (const line of lines) {
++    try {
++      const parsed = JSON.parse(line) as { at?: string; hits?: string[] };
++      if (!parsed.at || !Array.isArray(parsed.hits)) continue;
++      for (const id of parsed.hits) {
++        const existing = totals.get(id);
++        if (existing) {
++          existing.count += 1;
++          if (parsed.at > existing.lastAt) existing.lastAt = parsed.at;
++        } else {
++          totals.set(id, { count: 1, lastAt: parsed.at });
++        }
++      }
++    } catch {
++      // A torn final line is expected if the process died mid-append. Skip it.
++    }
++  }
++
++  if (totals.size === 0) {
++    return { linesRead: lines.length, recordsTouched: 0, rowsUpdated: 0 };
++  }
++
++  const db = new DatabaseSync(dbPath);
++  let rowsUpdated = 0;
++  try {
++    db.exec("PRAGMA busy_timeout = 5000");
++    db.exec("BEGIN IMMEDIATE");
++    const stmt = db.prepare(
++      `UPDATE l1_records
++          SET access_count = COALESCE(access_count, 0) + ?,
++              last_access_time = CASE
++                WHEN last_access_time IS NULL OR last_access_time < ? THEN ?
++                ELSE last_access_time
++              END
++        WHERE record_id = ?`,
++    );
++    for (const [id, total] of totals) {
++      const info = stmt.run(total.count, total.lastAt, total.lastAt, id);
++      rowsUpdated += Number((info as { changes?: number }).changes ?? 0);
++    }
++    db.exec("COMMIT");
++  } catch (err) {
++    try {
++      db.exec("ROLLBACK");
++    } catch {
++      /* the transaction is already gone */
++    }
++    throw err;
++  } finally {
++    db.close();
++  }
++
++  const archivePath = `${logPath}.folded-${new Date().toISOString().replace(/[:.]/g, "-")}`;
++  try {
++    renameSync(logPath, archivePath);
++  } catch {
++    // The counters are already committed. Leaving the log in place means the next
++    // fold double-counts, so say so loudly instead of pretending it worked.
++    return { linesRead: lines.length, recordsTouched: totals.size, rowsUpdated, archivePath: undefined };
++  }
++
++  return { linesRead: lines.length, recordsTouched: totals.size, rowsUpdated, archivePath };
++}
++
++/** Direct bump for records a caller already decided are useful. */
++export function reinforce(dbPath: string, recordIds: string[], now: Date = new Date()): number {
++  if (recordIds.length === 0) return 0;
++  const db = new DatabaseSync(dbPath);
++  try {
++    db.exec("PRAGMA busy_timeout = 5000");
++    const stmt = db.prepare(
++      `UPDATE l1_records
++          SET access_count = COALESCE(access_count, 0) + 1,
++              last_access_time = ?
++        WHERE record_id = ?`,
++    );
++    let written = 0;
++    for (const id of recordIds) {
++      const info = stmt.run(now.toISOString(), id);
++      written += Number((info as { changes?: number }).changes ?? 0);
++    }
++    return written;
++  } finally {
++    db.close();
++  }
++}
+diff --git a/MemoryCore/src/gateway/server.ts b/MemoryCore/src/gateway/server.ts
+index 9f02361..ae7e32b 100644
+--- a/MemoryCore/src/gateway/server.ts
++++ b/MemoryCore/src/gateway/server.ts
+@@ -23,7 +23,7 @@ import dayjs from "dayjs";
+ import { TdaiCore } from "../core/tdai-core.js";
+ import { StandaloneHostAdapter } from "../adapters/standalone/host-adapter.js";
+ import { loadGatewayConfig, parseBrokers } from "./config.js";
+-import { recallDecaySettings } from "../config.js";
++import { recallAccessLogPath, recallDecaySettings, recallMaxRankCounted } from "../config.js";
+ import type { GatewayConfig, GatewayConfigOverrides } from "./config.js";
+ import { dbChoiceToStoreConfigs, LocalBackendResolver } from "../core/backend-selection/index.js";
+ import type { BackendResolver } from "../core/backend-selection/index.js";
+@@ -553,7 +553,13 @@ export class TdaiGateway {
+    */
+   async start(): Promise<void> {
+     // Initialize data directories
+-    initDataDirectories(this.config.data.baseDir);
++    // Pass the access log path so its parent directory is created up front;
++    // a missing parent makes appendRecall fail silently on every search.
++    initDataDirectories(
++      this.config.data.baseDir,
++      undefined,
++      recallAccessLogPath(this.config.memory.recall, this.config.data.baseDir),
++    );
+ 
+     applyMetadataEnvFromGatewayConfig(this.config.metadata);
+     // yaml `taskSource.env` → process.env（env 已设置则不覆盖）。
+@@ -1071,6 +1077,18 @@ export class TdaiGateway {
+         // both search callers (MCP tool + HTTP) and no second source of truth.
+         // Returns undefined unless memory.recall.decay.enabled is true.
+         getDecaySettings: () => recallDecaySettings(this.config.memory.recall),
++        // Access-evidence log, resolved against the same data.baseDir the store
++        // and the dir init above use. Undefined when memory.recall.accessLog is
++        // disabled. The parent directory is created at dir-init time below, not
++        // here: appendFileSync does not create directories and a per-search
++        // mkdir on the hot path would put a syscall in every retrieval.
++        getAccessLogPath: () =>
++          recallAccessLogPath(this.config.memory.recall, this.config.data.baseDir),
++        // The log's rank window, from the same group. Undefined when the log is
++        // off, which leaves appendRecall's default in place — it is never called
++        // in that case anyway, but returning a window for a disabled log would
++        // make the two keys disagree about whether the feature is on.
++        getMaxRankCounted: () => recallMaxRankCounted(this.config.memory.recall),
+         // `V3_STRICT_ISOLATION` controls only /v3 L0–L3 memory data-plane
+         // strictness. Default OFF for local/integration; production should set it.
+         v3StrictIsolation: resolveV3StrictIsolation(),
+diff --git a/MemoryCore/src/gateway/v2-router.ts b/MemoryCore/src/gateway/v2-router.ts
+index 24aa66f..a7fcf3f 100644
+--- a/MemoryCore/src/gateway/v2-router.ts
++++ b/MemoryCore/src/gateway/v2-router.ts
+@@ -237,6 +237,22 @@ export interface V2RouterDeps {
+    * exactly the pre-0103 behaviour.
+    */
+   getDecaySettings?: () => DecaySettings | undefined;
++  /**
++   * Absolute path of the access-evidence log, or undefined to record nothing.
++   *
++   * A getter for the same reason as getDecaySettings, plus one more: the log
++   * path depends on the data directory, which the router does not know. Optional
++   * so every existing construction site keeps compiling — an absent getter means
++   * "no access evidence", which is exactly the pre-0104 behaviour.
++   */
++  getAccessLogPath?: () => string | undefined;
++  /**
++   * Rank window for the access-evidence log
++   * (`memory.recall.accessLog.maxRankCounted`), or undefined to leave
++   * `appendRecall` on its own default. A getter for the same reason as the path:
++   * it comes from the config the router does not hold.
++   */
++  getMaxRankCounted?: () => number | undefined;
+   logger: Logger;
+ 
+   /**
+@@ -1240,6 +1256,13 @@ async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId:
+     // recallDecaySettings); the getter is optional so an unwired host keeps the
+     // relevance-only ordering.
+     decay: deps.getDecaySettings?.(),
++    // Undefined unless memory.recall.accessLog is enabled (see
++    // recallAccessLogPath); the getter is optional so an unwired host records
++    // no evidence rather than failing.
++    accessLogPath: deps.getAccessLogPath?.(),
++    // The configured rank window. Sent alongside the path so the key has a
++    // consumer; an unwired host omits it and appendRecall keeps its default.
++    maxRankCounted: deps.getMaxRankCounted?.(),
+   });
+   const recallLatencyMs = performance.now() - tStart;
+ 
+diff --git a/MemoryCore/src/utils/pipeline-factory.ts b/MemoryCore/src/utils/pipeline-factory.ts
+index 2ca6bb4..61eef69 100644
+--- a/MemoryCore/src/utils/pipeline-factory.ts
++++ b/MemoryCore/src/utils/pipeline-factory.ts
+@@ -14,7 +14,7 @@
+ import fs from "node:fs";
+ import path from "node:path";
+ import { createHash, randomUUID } from "node:crypto";
+-import type { MemoryTdaiConfig } from "../config.js";
++import { recallAccessLogPath, type MemoryTdaiConfig } from "../config.js";
+ import { MemoryPipelineManager } from "./pipeline-manager.js";
+ import type { L2Runner } from "./pipeline-manager.js";
+ import { SessionFilter } from "./session-filter.js";
+@@ -234,11 +234,31 @@ export interface PipelineInstance {
+  * Ensure all required data subdirectories exist under `pluginDataDir`.
+  * Safe to call multiple times (mkdirSync with `recursive: true`).
+  *
+- * When a StorageAdapter is provided, local directory creation is skipped
+- * because files are stored remotely (COS). The backend handles path creation.
++ * When a StorageAdapter is provided, the data subdirectories are skipped
++ * because files are stored remotely (COS) and the backend handles path creation.
++ * The access log's parent is still created: that log is always a local file,
++ * whatever backend holds the records.
+  */
+-export function initDataDirectories(dataDir: string, storage?: StorageAdapter): void {
+-  if (storage) return; // COS mode: no local directories needed
++export function initDataDirectories(
++  dataDir: string,
++  storage?: StorageAdapter,
++  accessLogPath?: string,
++): void {
++  // The access log's parent, when the log lives somewhere other than the data
++  // dir itself. `appendFileSync` does not create directories: with the parent
++  // missing, every search silently records nothing and the only symptom is a
++  // file that never appears while search keeps working. Creating it here — once,
++  // at startup — keeps that failure mode out of the hot path, which is why this
++  // is not a mkdir before each append.
++  //
++  // It is created before the COS early return, not after: the access log is a
++  // local file even when records are stored remotely, so "storage is set" says
++  // nothing about whether this path needs its parent. It sits after the check
++  // only in the sense that COS mode has no other local directories to make.
++  if (accessLogPath) {
++    fs.mkdirSync(path.dirname(accessLogPath), { recursive: true });
++  }
++  if (storage) return; // COS mode: no other local directories needed
+   const dirs = ["conversations", "records", "scene_blocks", ".metadata", ".backup"];
+   for (const sub of dirs) {
+     fs.mkdirSync(path.join(dataDir, sub), { recursive: true });
+@@ -1443,8 +1463,9 @@ export function createPipelineManager(
+ export async function createPipeline(opts: PipelineFactoryOptions): Promise<PipelineInstance> {
+   const { pluginDataDir, cfg, openclawConfig, logger, sessionFilter, l1LlmRunner } = opts;
+ 
+-  // Ensure data directories exist
+-  initDataDirectories(pluginDataDir);
++  // Ensure data directories exist (including the access log's parent — see
++  // initDataDirectories; a missing one loses evidence without an error).
++  initDataDirectories(pluginDataDir, undefined, recallAccessLogPath(cfg.recall, pluginDataDir));
+ 
+   // Initialize stores (once-async: reuses cached result if already initialized)
+   const stores = await initStores(cfg, pluginDataDir, logger);
