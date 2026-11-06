@@ -29,7 +29,7 @@ import { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { corpusStats, loadRecords } from "./adapters/tdai-sqlite.ts";
 import { buildForgettingPlan, type ForgettingPlanReport } from "./planner.ts";
-import { applyPlan, auditSummary } from "./applier.ts";
+import { applyPlan, auditRun, auditSummary, reasonKey, type AuditSummary } from "./applier.ts";
 import { foldAccessLog, type FoldResult } from "./recall.ts";
 import { DEFAULT_DECAY } from "./scoring.ts";
 import { coverageClimb, coverageReport, type CoverageReport } from "./coverage.ts";
@@ -196,6 +196,7 @@ async function main(argv: string[]): Promise<number> {
       "false-supersede-rate": { type: "string" },
       suggestions: { type: "boolean", default: false },
       limit: { type: "string" },
+      run: { type: "string" },
       report: { type: "string" },
       "judge-url": { type: "string" },
       "judge-model": { type: "string" },
@@ -327,8 +328,36 @@ async function main(argv: string[]): Promise<number> {
       }
       return 0;
     }
+    if (values.run) {
+      // Drill-down. The record id and the reason are the two things an operator needs;
+      // the from/to pair answers "did it actually move" without a second query.
+      const runId = String(values.run);
+      const entries = auditRun(dbPath, runId, num(values.limit, 50));
+      if (values.json) {
+        process.stdout.write(JSON.stringify(entries, null, 2) + "\n");
+        return 0;
+      }
+      if (entries.length === 0) {
+        // Not an error: a run id that touched nothing, or a typo. Both need the same
+        // answer, and a non-zero exit would make a script treat it as a failure.
+        process.stdout.write(`no audit rows for run ${runId}\n`);
+        return 0;
+      }
+      const lines = [`run ${runId}: ${entries.length} row(s)`, ""];
+      for (const entry of entries) {
+        const score = typeof entry.score === "number" ? entry.score.toFixed(3) : "-";
+        lines.push(`${entry.record_id}  ${entry.from_state} -> ${entry.to_state}  ${entry.action}  score=${score}`);
+        lines.push(`    ${entry.decided_at}  ${entry.reason}`);
+      }
+      process.stdout.write(lines.join("\n") + "\n");
+      return 0;
+    }
     const summary = auditSummary(dbPath);
-    process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
+    if (values.json) {
+      process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
+      return 0;
+    }
+    process.stdout.write(renderAudit(summary));
     return 0;
   }
 
@@ -825,6 +854,47 @@ function parseOptionalRate(raw: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * Human-readable audit view.
+ *
+ * The JSON dump answers "what shape is this object"; this answers "what happened last
+ * week, and why". Grouped, ordered by frequency, one screen. An audit view people scroll
+ * past is an audit view that gets ignored.
+ */
+function renderAudit(summary: AuditSummary): string {
+  const lines: string[] = [];
+  const latest = summary.runs[0];
+  lines.push(
+    `runs            ${summary.runs.length}${latest ? `  (latest ${latest.run_id}, ${latest.started_at})` : ""}`,
+  );
+
+  const knownActions = ["archive", "retire", "rollback", "invalidate", "llm-suggest"];
+  const actionParts = knownActions.map((action) => `${action}:${summary.actions[action] ?? 0}`);
+  for (const [action, count] of Object.entries(summary.actions)) {
+    if (!knownActions.includes(action)) actionParts.push(`${action}:${count}`);
+  }
+  lines.push(`by action       ${actionParts.join("  ")}`);
+
+  lines.push("by reason");
+  if (summary.reasons.length === 0) lines.push("      0  (no audit rows)");
+  for (const reason of summary.reasons.slice(0, 8)) {
+    lines.push(`  ${String(reason.count).padStart(5)}  ${reason.key}`);
+  }
+
+  const typeParts = Object.entries(summary.types).map(([type, count]) => `${type}:${count}`);
+  lines.push(`by type         ${typeParts.length > 0 ? typeParts.join("  ") : "(none)"}`);
+
+  lines.push("by run");
+  if (summary.runs.length === 0) lines.push("  (no runs)");
+  for (const run of summary.runs.slice(0, 5)) {
+    // Two lines rather than one: a run id is 36 characters and the timestamp 24, so a
+    // single row runs past 100 columns and wraps in the middle of the identifier.
+    lines.push(`  ${run.run_id}`);
+    lines.push(`    ${run.started_at}  archived:${run.archived} retired:${run.retired}  ${run.mode ?? "-"}  ${run.status}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
 function renderPlan(plan: ForgettingPlanReport): string {
   const lines: string[] = [];
   lines.push(`plan        ${plan.generatedAt}`);
@@ -851,7 +921,7 @@ function renderPlan(plan: ForgettingPlanReport): string {
   const byReason = new Map<string, number>();
   for (const d of plan.decisions) {
     if (d.decision === "keep") continue;
-    const key = d.reason.replace(/\d+(\.\d+)?/g, "#");
+    const key = reasonKey(d.reason);
     byReason.set(key, (byReason.get(key) ?? 0) + 1);
   }
   lines.push("eviction reasons:");

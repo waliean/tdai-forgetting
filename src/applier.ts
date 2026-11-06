@@ -132,10 +132,55 @@ export function applyPlan(dbPath: string, plan: ForgettingPlanReport, opts: Appl
   }
 }
 
+/** One row of `forgetting_runs`, with the fields an operator needs to recognise it. */
+export interface RunSummary {
+  run_id: string;
+  started_at: string;
+  archived: number;
+  retired: number;
+  status: string;
+  mode: string | null;
+  actor: string | null;
+}
+
+/** One audit row, as the per-run drill-down shows it. */
+export interface AuditEntry {
+  record_id: string;
+  action: string;
+  from_state: string;
+  to_state: string;
+  score: number | null;
+  reason: string;
+  decided_at: string;
+}
+
 /** Counters for the operator, computed from the audit trail rather than trusted from the plan. */
 export interface AuditSummary {
   states: Record<string, number>;
-  runs: Array<{ run_id: string; started_at: string; archived: number; retired: number; status: string }>;
+  runs: RunSummary[];
+  /** Rows per action (`archive`, `retire`, `rollback`, `invalidate`, `llm-suggest`). */
+  actions: Record<string, number>;
+  /**
+   * Reasons with their numbers generalised away, most frequent first.
+   *
+   * `score 0.312 < archive 0.45` and `score 0.298 < archive 0.45` are one kind of
+   * reason, not two. The same rule the plan renderer uses (`\d+(\.\d+)?` -> `#`) is
+   * applied here, so the two views cannot disagree about what counts as one reason.
+   */
+  reasons: Array<{ key: string; count: number; example: string }>;
+  /** Record types the audit rows point at; needs the join, so it is empty pre-migration. */
+  types: Record<string, number>;
+}
+
+/**
+ * Generalise a reason for counting: digits become `#`.
+ *
+ * Exported because the plan renderer and the audit view must use the same rule; two
+ * copies would drift and then "the top reason" would mean different things in the two
+ * places an operator looks.
+ */
+export function reasonKey(reason: string): string {
+  return reason.replace(/\d+(\.\d+)?/g, "#");
 }
 
 export function auditSummary(dbPath: string): AuditSummary {
@@ -154,7 +199,7 @@ export function auditSummary(dbPath: string): AuditSummary {
       try {
         runs = db
           .prepare(
-            "SELECT run_id, started_at, archived, retired, status FROM forgetting_runs ORDER BY started_at DESC LIMIT 20",
+            "SELECT run_id, started_at, archived, retired, status, mode, actor FROM forgetting_runs ORDER BY started_at DESC LIMIT 20",
           )
           .all() as unknown as AuditSummary["runs"];
       } catch {
@@ -162,7 +207,63 @@ export function auditSummary(dbPath: string): AuditSummary {
         runs = [];
       }
     }
-    return { states, runs };
+
+    const actions: Record<string, number> = {};
+    const reasons: AuditSummary["reasons"] = [];
+    const types: Record<string, number> = {};
+    if (migrated) {
+      // The audit table only grows, so every query here is bounded. `GROUP BY` collapses
+      // the rows, and the LIMIT caps how much a table with thousands of distinct reasons
+      // can hand back: an operator asking "what happened" should not wait a minute for it.
+      try {
+        const actionRows = db
+          .prepare("SELECT action, COUNT(*) AS c FROM forgetting_audit GROUP BY action LIMIT 100")
+          .all() as unknown as Array<{ action: string; c: number }>;
+        for (const row of actionRows) actions[row.action] = row.c;
+
+        const reasonRows = db
+          .prepare("SELECT reason, COUNT(*) AS c FROM forgetting_audit GROUP BY reason LIMIT 500")
+          .all() as unknown as Array<{ reason: string; c: number }>;
+        const grouped = new Map<string, { count: number; example: string }>();
+        for (const row of reasonRows) {
+          const key = reasonKey(row.reason);
+          const existing = grouped.get(key);
+          if (existing) existing.count += row.c;
+          else grouped.set(key, { count: row.c, example: row.reason });
+        }
+        for (const [key, value] of grouped) reasons.push({ key, count: value.count, example: value.example });
+        reasons.sort((a, b) => b.count - a.count);
+
+        const typeRows = db
+          .prepare(
+            "SELECT r.type AS type, COUNT(*) AS c FROM forgetting_audit a JOIN l1_records r ON r.record_id = a.record_id GROUP BY r.type LIMIT 50",
+          )
+          .all() as unknown as Array<{ type: string; c: number }>;
+        for (const row of typeRows) types[row.type] = row.c;
+      } catch {
+        // Audit table absent while the run table exists: report the runs, not a crash.
+      }
+    }
+
+    return { states, runs, actions, reasons, types };
+  } finally {
+    db.close();
+  }
+}
+
+/** Every audit row a run wrote, newest first. Used by `audit --run <id>`. */
+export function auditRun(dbPath: string, runId: string, limit: number): AuditEntry[] {
+  if (!hasForgettingSchema(dbPath)) return [];
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db
+      .prepare(
+        `SELECT record_id, action, from_state, to_state, score, reason, decided_at
+           FROM forgetting_audit WHERE run_id = ? ORDER BY decided_at DESC LIMIT ?`,
+      )
+      .all(runId, limit) as unknown as AuditEntry[];
+  } catch {
+    return [];
   } finally {
     db.close();
   }
