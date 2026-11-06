@@ -15,6 +15,7 @@
     "test:watch": "node --test --watch test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "bench": "node bench/run-bench.ts",
+    "sweep": "node bench/sweep.ts",
     "rollback": "node scripts/rollback-forgetting.mjs"
   },
   "files": [

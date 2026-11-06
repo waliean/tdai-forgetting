@@ -294,9 +294,12 @@ test("the patch ships a copy of this exact module, not a divergent one", () => {
     .map((l) => l.slice(1))
     .join("\n");
   const shipped = readFileSync(join(import.meta.dirname, "..", "src", "recall.ts"), "utf8");
-  // Trailing newline handling differs between a file and a patch body; compare
-  // the meaningful content, not the file terminator.
-  assert.equal(added.trimEnd(), shipped.trimEnd(), "the shipped copy must be this file");
+  // Two differences here are checkout artefacts, not divergence: a file ends with
+  // a newline and a patch body does not, and *.patch is marked -text while
+  // src/*.ts is not, so core.autocrlf=true hands this file back as CRLF on Windows
+  // while the patch body stays LF. Compare the code, not the transport.
+  const asWritten = (s: string) => s.replace(/\r\n/g, "\n").trimEnd();
+  assert.equal(asWritten(added), asWritten(shipped), "the shipped copy must be this file");
 });
 // ── The configured rank window reaches the log (FE-001 P1-a) ──
 //
