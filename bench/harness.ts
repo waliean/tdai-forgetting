@@ -15,12 +15,20 @@
  */
 
 import { loadVectorIndex, embedWithOllama, searchVectors } from "./vector-index.ts";
-import { jaccard, shingles } from "../src/redundancy.ts";
+import { DEFAULT_CLUSTER_OPTIONS, jaccard, shingles } from "../src/redundancy.ts";
 import type { MemoryRecord } from "../src/types.ts";
 
 export const RRF_K = 60;
-/** Similarity at or above which two records are treated as the same fact. */
-export const DUPLICATE_THRESHOLD = 0.6;
+/**
+ * The similarity at which two records count as the same fact.
+ *
+ * Deliberately an alias of the shipped clustering threshold rather than a second
+ * constant that happens to hold the same number. It was a copy of 0.6 for two sweeps'
+ * worth of time, and the only reason nothing disagreed is that the two literals were
+ * equal — the moment D4 moved the default to 0.7 the benchmark and the sweep started
+ * measuring different collapse points. One definition, imported.
+ */
+export const DUPLICATE_THRESHOLD = DEFAULT_CLUSTER_OPTIONS.threshold;
 
 export interface QueryCase {
   text: string;

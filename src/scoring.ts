@@ -9,8 +9,16 @@
  *
  * The decay term is the half-life model MemOS ships in 12 lines of TypeScript:
  *   decay = floor + (1 - floor) * 2^(-age / halfLife)
- * The floor (0.3, same value mem0 documents) keeps a stale-but-relevant memory
- * retrievable. Forgetting here means "rank lower", never "cannot be found".
+ * The floor keeps a stale-but-relevant memory retrievable. Forgetting here means
+ * "rank lower", never "cannot be found".
+ *
+ * Both numbers were re-picked from a sweep, not left at the values mem0 documents.
+ * 30 days sat just past the point where pinRecall starts dropping (bench/sweep.ts,
+ * docs/experiments/参数敏感度-2026-11-06.md): across synthetic and long-text corpora
+ * the pin recall is flat from 5 to 14 days and falls after that, so 10 is the middle
+ * of the plateau rather than its edge. The floor is flat from 0.1 to 0.3 and changes
+ * at 0.4, so 0.2 is likewise the middle. Picking an edge would have been picking the
+ * best number on one corpus.
  *
  * The usage term uses diminishing returns, as MemoryOS does for its mid-term heat
  * score: 1 - exp(-access / saturation). The gap between zero and three recalls
@@ -29,8 +37,8 @@ import { isHardPinned } from "./pin.ts";
 import type { DecayConfig, MemoryRecord, ScoredRecord } from "./types.ts";
 
 export const DEFAULT_DECAY: DecayConfig = {
-  halfLifeDays: 30,
-  floor: 0.3,
+  halfLifeDays: 10,
+  floor: 0.2,
   usageWeight: 0.3,
   importanceWeight: 0.4,
   decayWeight: 0.3,
@@ -40,8 +48,7 @@ export const DEFAULT_DECAY: DecayConfig = {
 
 const MS_PER_DAY = 86_400_000;
 
-/** Bounds on the retrieval multiplier. Below MIN a memory would effectively vanish. */
-const MIN_MULTIPLIER = 0.3;
+/** Upper bound on the retrieval multiplier. The lower bound is the configured floor. */
 const MAX_MULTIPLIER = 1.5;
 /** How much a full usage score (1.0) adds on top of the decay term. */
 const USAGE_BOOST = 0.5;
@@ -194,7 +201,11 @@ export function searchMultiplier(
   // twenty times should outrank a pinned one they never touch.
   if (isHardPinned(record)) return 1;
   const raw = d + USAGE_BOOST * u;
-  return Math.min(MAX_MULTIPLIER, Math.max(MIN_MULTIPLIER, raw));
+  // The floor is the multiplier's lower bound, not a separate constant. Those were two
+  // values making the same promise, and they only agreed while floor happened to be
+  // 0.3 — lowering the floor to 0.2 would have left this clamp silently overriding it,
+  // while the shipped patch clamps at its own floor. test/equivalence.test.ts caught it.
+  return Math.min(MAX_MULTIPLIER, Math.max(cfg.floor, raw));
 }
 
 export interface RerankOptions {

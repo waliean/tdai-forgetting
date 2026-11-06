@@ -65,7 +65,14 @@ export interface ClusterOptions {
 }
 
 export const DEFAULT_CLUSTER_OPTIONS: ClusterOptions = {
-  threshold: 0.6,
+  // 0.6 was the value copied from the published examples; the sweep moved it to the
+  // middle of the safe band instead. At 0.4 the synthetic corpus loses 93.6% of its
+  // records to duplicate collapsing and the long-text one 81.7%; at 0.6 that is
+  // already 35.8% and 0%, and 0.6 is only 0.2 above the cliff. 0.7 keeps the duplicate
+  // count falling (35.8% -> 26.2%) within the band from 0.6 to 0.8, so the shipped
+  // default is no longer one nudge away from collapsing a corpus.
+  // See docs/experiments/参数敏感度-2026-11-06.md.
+  threshold: 0.7,
   minLength: 40,
   sameTypeOnly: true,
 };

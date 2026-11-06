@@ -149,8 +149,13 @@ test("the probe ranks a real candidate pool on a corpus that matches the query",
 
 test("reordered counts moved POSITIONS, not a set difference", () => {
   withCorpus(60, (dbPath) => {
-    const report = coverageReport(dbPath, DEFAULT_DECAY, NOW);
-    const ranked = probeRanking(dbPath, DEFAULT_DECAY, NOW);
+    // A half-life chosen for the shape, not for the corpus: long enough that the same
+    // ten records come back, short enough that their order changes. With the shipped
+    // 10 days the decay swaps records out of the window and the two quantities happen
+    // to coincide, which would let this test pass while proving nothing.
+    const gentle = { ...DEFAULT_DECAY, halfLifeDays: 30, floor: 0.3 };
+    const report = coverageReport(dbPath, gentle, NOW);
+    const ranked = probeRanking(dbPath, gentle, NOW);
     const positions = ranked.fusion.filter((id, i) => id !== ranked.decayed[i]).length;
     assert.equal(report.reordered, positions);
 
@@ -161,8 +166,10 @@ test("reordered counts moved POSITIONS, not a set difference", () => {
     assert.equal(report.decayActive, false);
     assert.ok(report.reordered > 0, "decay would move positions even on a cold corpus");
 
-    // And a set comparison is not the same number: it reads 0 whenever the same ten
-    // records come back in a different order, which is a different claim entirely.
+    // And a set comparison is not the same number: on this corpus it reads 2 while the
+    // positions moved read 10, because decay both reorders and, at the edges of the
+    // window, replaces. The claim being tested is that the two quantities differ, not
+    // that one of them is zero — asserting the zero was my own over-reach.
     const setDifference = ranked.fusion.filter((id) => !ranked.decayed.includes(id)).length;
     assert.notEqual(setDifference, positions);
   });

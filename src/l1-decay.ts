@@ -52,8 +52,8 @@ export interface DecaySettings {
 }
 
 export const DEFAULT_DECAY_SETTINGS: Required<Omit<DecaySettings, "now">> = {
-  halfLifeDays: 30,
-  floor: 0.3,
+  halfLifeDays: 10,
+  floor: 0.2,
   ceiling: 1.5,
   usageSaturation: 5,
   usageBoost: 0.5,

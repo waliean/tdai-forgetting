@@ -171,7 +171,9 @@ test("search multiplier is bounded and order-preserving for equal scores", () =>
   const fresh = record({ record_id: "fresh", updated_time: "2026-10-26T00:00:00.000Z", access_count: 50 });
   const stale = record({ record_id: "stale", updated_time: "2025-01-01T00:00:00.000Z", access_count: 0 });
   assert.ok(searchMultiplier(fresh, DEFAULT_DECAY, NOW) <= 1.5);
-  assert.ok(searchMultiplier(stale, DEFAULT_DECAY, NOW) >= 0.3);
+  // The lower bound is the floor itself; asserting the literal 0.3 here would just
+  // re-hardcode the value this test exists to keep configurable.
+  assert.ok(searchMultiplier(stale, DEFAULT_DECAY, NOW) >= DEFAULT_DECAY.floor);
 
   const ranked = rerankHits(
     [

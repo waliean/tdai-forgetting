@@ -135,5 +135,5 @@ test("describeCorpus reports the statistics the calibration needs", () => {
 
   const lines = formatStats(stats);
   assert.match(lines[0], /corpus fixture: 4 records/);
-  assert.match(lines.join("\n"), /duplicate groups at 0\.6: 1/);
+  assert.match(lines.join("\n"), new RegExp(`duplicate groups at ${DEFAULT_CLUSTER_OPTIONS.threshold}: 1`));
 });

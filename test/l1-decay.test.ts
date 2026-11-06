@@ -29,8 +29,10 @@ function candidate(overrides: Partial<DecayCandidate> = {}): DecayCandidate {
 
 test("a six-day-old unused record keeps most of its weight", () => {
   const outcome = decayOutcome(candidate(), { now: NOW });
-  // 0.3 + 0.7 * 2^(-6/30) ≈ 0.909: mildly demoted, nowhere near the floor.
-  assert.ok(Math.abs(outcome.multiplier - (0.3 + 0.7 * Math.pow(2, -6 / 30))) < 1e-9);
+  // Computed from the shipped settings rather than retyped: this assertion is about the
+  // shape of the curve, and hardcoding 30 here is how the number stops being calibrated.
+  const { floor, halfLifeDays } = DEFAULT_DECAY_SETTINGS;
+  assert.ok(Math.abs(outcome.multiplier - (floor + (1 - floor) * Math.pow(2, -6 / halfLifeDays))) < 1e-9);
   assert.equal(outcome.reason, "decayed");
 });
 

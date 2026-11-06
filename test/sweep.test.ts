@@ -21,6 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DEFAULT_CLUSTER_OPTIONS } from "../src/redundancy.ts";
+
 const SWEEP = fileURLToPath(new URL("../bench/sweep.ts", import.meta.url));
 const BENCH = fileURLToPath(new URL("../bench/run-bench.ts", import.meta.url));
 
@@ -84,7 +86,7 @@ test("the default point writes the header plus one row carrying the shipped defa
     // Read from DEFAULT_DECAY / DEFAULT_CLUSTER_OPTIONS / DEFAULT_EVICTION, not typed
     // into the sweep: D4 revises a default, and a stale copy here would keep
     // calibrating a value the system no longer uses.
-    assert.deepEqual(rows[0].slice(0, 6), ["30", "0.3", "0.1", "0.6", "0.45", "0.25"]);
+    assert.deepEqual(rows[0].slice(0, 6), ["10", "0.2", "0.1", "0.7", "0.45", "0.25"]);
     assert.equal(rows[0][6], "true", "synthetic corpus carries access history, so the gate opens");
   });
 });
@@ -184,7 +186,7 @@ test("--describe writes the corpus profile to stderr and leaves the CSV alone", 
     assert.equal(status, 0);
     assert.match(stderr, /corpus longtext: 120 records/);
     assert.match(stderr, /length \(chars\): min \d+, p50 \d+, p90 \d+, max \d+/);
-    assert.match(stderr, /duplicate groups at 0\.6: \d+/);
+    assert.match(stderr, new RegExp(`duplicate groups at ${DEFAULT_CLUSTER_OPTIONS.threshold}: \\d+`));
     // A corpus profile describes the input; a CSV row describes an output. Mixing
     // them would produce one table whose columns mean two different things.
     assert.deepEqual(parseCsv(csv).header, EXPECTED_HEADER);
