@@ -1,0 +1,7 @@
+halfLifeDays,floor,minTrackingCoverage,clusterThreshold,archiveThreshold,retireThreshold,decayActive,precisionAtK,pinRecall,dupShare,evictedShare
+7,0.3,0.1,0.6,0.45,0.25,true,0.2469,0.5000,0.0000,0.0333
+14,0.3,0.1,0.6,0.45,0.25,true,0.2525,0.5000,0.0000,0.0000
+30,0.3,0.1,0.6,0.45,0.25,true,0.2519,0.3889,0.0000,0.0000
+45,0.3,0.1,0.6,0.45,0.25,true,0.2667,0.3333,0.0000,0.0000
+60,0.3,0.1,0.6,0.45,0.25,true,0.2611,0.3333,0.0000,0.0000
+90,0.3,0.1,0.6,0.45,0.25,true,0.2667,0.3333,0.0000,0.0000
