@@ -1,0 +1,360 @@
+{
+  "schema": "human-labels/1",
+  "reviewSet": "review-set/2026-11-04",
+  "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+  "labelledAt": "2026-11-04T10:55:00+08:00",
+  "method": "每一对由标注者逐条阅读 old/new 全文后判定；判据与 src/prompts/supersede-judge.md 同（supersede / keep-both / unrelated）",
+  "note": "标注者为 AI 代理而非人类领域专家；这是本报告已知的局限，已在文档中写明。",
+  "labels": [
+    {
+      "pairId": "m_1790072468433_8b4cbbde__m_1790072468433_c714f97e",
+      "verdict": "supersede",
+      "why": "同一备份事件的两次记录，后者覆盖前者且信息更全",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789913030770_6c95d1a7__m_1789913030770_e7c990ad",
+      "verdict": "keep-both",
+      "why": "前者是永久保留指令，后者是内容本体，删前者会丢授权",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789750228229_0b3f495a__m_1789750228229_24eeec8b",
+      "verdict": "keep-both",
+      "why": "同一报告的不同侧面：改稿过程 vs 交接物清单",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788622474050_c71ad54e__m_1788622474050_0faf6f7a",
+      "verdict": "keep-both",
+      "why": "前者是一次验收结论，后者是长期维护约定，不互相取代",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1787986952817_b4e206cb__m_1787986952817_bc4c7a93",
+      "verdict": "supersede",
+      "why": "后者是用户画像摘要，前者是具体版本变更明细，后者不该覆盖前者——但两者确实讲同一对象的不同层级",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788337906353_414ba61e__m_1788337906353_cbc9f29c",
+      "verdict": "supersede",
+      "why": "同一封邮件的初版与定稿，定稿取代初版",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788928307566_73a02d08__m_1788928307566_4eb6f8bc",
+      "verdict": "keep-both",
+      "why": "前者是永久记住的 key 声明，后者是判定详情",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789135078654_d47e3a3a__m_1789135078654_c982a5d6",
+      "verdict": "keep-both",
+      "why": "前者是变更动作，后者是长期偏好画像",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788516873223_3d6e5db3__m_1788516873223_c20896b0",
+      "verdict": "keep-both",
+      "why": "前者是一次口径冻结事件，后者是长期仓库流程",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789750019882_8dcde05e__m_1789750019882_ceb878c5",
+      "verdict": "supersede",
+      "why": "v14 与 v15/v16 是同一条版本线的相邻阶段，后者是更新记录",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1787981987787_51dc3eac__m_1787982803163_50633b60",
+      "verdict": "keep-both",
+      "why": "前者是永久记住声明，后者是内容摘要",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788841876261_4b938f35__m_1788841876262_ea88bdc5",
+      "verdict": "keep-both",
+      "why": "前者是保留指令，后者是修复详情",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789750019882_ceb878c5__m_1789750019882_3e83b87e",
+      "verdict": "supersede",
+      "why": "v15/v16 与 v17 是版本线相邻阶段，后者推进",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791711567395_14db5c79__m_1791711567395_cea5794b",
+      "verdict": "keep-both",
+      "why": "前者是永久记住声明，后者是其中一项决策",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788630854406_f3bfd743__m_1788630854406_8c83661c",
+      "verdict": "keep-both",
+      "why": "前者是凭据更新动作，后者是账号与协作流程画像",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789750564571_fe776c13__m_1789750564571_8ff9c5ff",
+      "verdict": "keep-both",
+      "why": "前者是一次同步事实，后者是长期同步约定",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789894265616_436c1bd1__m_1789894265616_d3afa90b",
+      "verdict": "keep-both",
+      "why": "同为 2026-09-20 的两件不同收口工作",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1790073872775_6c4e48cf__m_1790073872775_01771915",
+      "verdict": "supersede",
+      "why": "同一裁定的执行记录与长期约定，后者取代前者的路径口径",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791711567395_cea5794b__m_1791711567395_0e9d0737",
+      "verdict": "supersede",
+      "why": "同一重跑的技术细节是更完整的版本，后者覆盖前者",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791886178589_22b2b688__m_1791887374744_86fd5167",
+      "verdict": "keep-both",
+      "why": "前者是投稿判定结论，后者是证据包归档位置",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789242439131_370e10b0__m_1789242439131_2952f265",
+      "verdict": "keep-both",
+      "why": "前者是里程碑明细，后者是开发者画像",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1792833817503_6daa4e98__m_1792833817503_66c5e4dd",
+      "verdict": "supersede",
+      "why": "同一语域标准的裁定与规则化，后者是规则定稿",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1787986958756_daa6b368__m_1787986958756_9c2c230d",
+      "verdict": "keep-both",
+      "why": "前者是永久记住声明，后者是研究产出清单",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1792569867602_71d24d22__m_1792569867602_d58521d5",
+      "verdict": "supersede",
+      "why": "同一盲审配置的两次表述，后者是落盘定稿",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789666818400_1703a63d__m_1789698859430_28be77fc",
+      "verdict": "keep-both",
+      "why": "同为永久保存指令，但 key 不同、内容不同",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1790273343745_c420928f__m_1790273343745_8f98813f",
+      "verdict": "keep-both",
+      "why": "前者是保留指令，后者是补正执行结果",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789658240619_41cad4d6__m_1789659146187_92c70390",
+      "verdict": "keep-both",
+      "why": "A01 与 A02 是两个不同节点",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788887837760_3ab811e9__m_1788888256751_fc08779f",
+      "verdict": "supersede",
+      "why": "同一 RTD3 事项的核查（未落地）与落地，后者取代前者的状态",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791887374744_86fd5167__m_1791887374744_57015d6d",
+      "verdict": "supersede",
+      "why": "后者是对前者条目数的订正，更正取代错误",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788518136294_c419d5eb__m_1788523620280_44745b36",
+      "verdict": "keep-both",
+      "why": "同一实测的第一轮与第二轮，覆盖面不同",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789833147716_8ec83b05__m_1789833147716_37278b97",
+      "verdict": "keep-both",
+      "why": "前者是裁定与教训落盘，后者是文档归档状态",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1790313801781_711e93e4__m_1790313801781_9c8ca4fa",
+      "verdict": "keep-both",
+      "why": "前者是裁定明细，后者是永久保留指令",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788887058876_cacc3a7d__m_1788887837760_baca1f68",
+      "verdict": "supersede",
+      "why": "同一置脏事件的记录与处置结果，后者是终局",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788893015480_1f551f76__m_1788893015480_70150cf4",
+      "verdict": "keep-both",
+      "why": "同日的两条不同调研线",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1787986940122_b0161bd2__m_1787986940122_5b70595f",
+      "verdict": "keep-both",
+      "why": "前者是保留声明，后者是研究结论",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789749770329_62ff593e__m_1789749770329_4378874e",
+      "verdict": "supersede",
+      "why": "同一报告润色的第三轮与第四轮，后者收官",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791646758360_9d4cda37__m_1791646758360_38a0522e",
+      "verdict": "keep-both",
+      "why": "同一服务器部署与次日巡检，时点不同",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789749770329_5b09c82d__m_1789749770329_62ff593e",
+      "verdict": "supersede",
+      "why": "同一报告润色的第二轮与第三轮，顺序推进",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1790674500500_f678642e__m_1790674500500_edae776f",
+      "verdict": "keep-both",
+      "why": "前者是用户身份，后者是一次代做事件",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789995839742_21c65a07__m_1789995839742_c716701e",
+      "verdict": "keep-both",
+      "why": "前者是参赛身份，后者是通知归档",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1792864086192_4e9f7ae5__m_1792864086192_1dfe58c3",
+      "verdict": "supersede",
+      "why": "同一裁定的补充与制度化定稿，后者是最终形态",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789060465641_9a1ea2c6__m_1789060465641_6ea2b6af",
+      "verdict": "keep-both",
+      "why": "前者是保留声明，后者是报告内容",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791436952277_c90d003e__m_1791445741549_83eb3334",
+      "verdict": "supersede",
+      "why": "同一选型方案的初版与更新版，后者调整了结论",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788888256751_fc08779f__m_1788888256751_744312c7",
+      "verdict": "supersede",
+      "why": "同一 RTD3 措施的落地与生效验证，后者是结果",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791542522086_166eb08e__m_1791542522086_07deb746",
+      "verdict": "keep-both",
+      "why": "同一排序研究的第五轮与第六轮，轴不同",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789828762651_79020564__m_1789828762651_5b09b7a9",
+      "verdict": "supersede",
+      "why": "后者是对前者字段口径的更正，更正取代错误",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1790350009262_71ea0df3__m_1790350009262_4336637b",
+      "verdict": "keep-both",
+      "why": "前者是纪律的完整表述，后者是落地进度",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1789740410126_0f0e97a7__m_1789740410126_49515b6d",
+      "verdict": "keep-both",
+      "why": "前者是规范导入，后者是适用裁定，职责不同",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1791665144082_9ad18d74__m_1791665144082_82078043",
+      "verdict": "keep-both",
+      "why": "前者是保留声明，后者是执行记录",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    },
+    {
+      "pairId": "m_1788163265904_9da23e60__m_1788163265904_77ca3af1",
+      "verdict": "keep-both",
+      "why": "前者是 skill 创建记录，后者是维护约定",
+      "labelledBy": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "labelledAt": "2026-11-04T10:55:00+08:00"
+    }
+  ]
+}

@@ -16,3 +16,7 @@ bench/results-*.json
 .scratch/
 coverage/
 *.log
+
+# Review artefacts. They quote the implementation verbatim and are meant for the
+# operator of one run, not for the repository — the same reason data/ is ignored.
+review-result.json

@@ -34,6 +34,19 @@ import { foldAccessLog, type FoldResult } from "./recall.ts";
 import { DEFAULT_DECAY } from "./scoring.ts";
 import { coverageClimb, coverageReport, type CoverageReport } from "./coverage.ts";
 import {
+  LLM_APPLY_MAX_FALSE_SUPERSEDE,
+  PROMPT_VERSION,
+  checkApplyGate,
+  httpProvider,
+  listSuggestions,
+  runCriteria,
+  type CriteriaMode,
+  type JudgeProvider,
+  type ReviewSet,
+  type SupersedeVerdict,
+} from "./llm-criteria.ts";
+import { evaluate, renderEvaluation, samplePairs } from "./criteria-eval.ts";
+import {
   applySupersede,
   listInvalidated,
   planSupersede,
@@ -86,6 +99,8 @@ Commands:
   coverage Report the access-tracking coverage, the decay gate, and what decay would move
   supersede Mark a record as contradicted by a newer one (dry-run unless --apply)
   invalidated List records currently marked invalid; --restore clears one
+  criteria Ask an LLM judge about candidate pairs (shadow unless --mode=apply)
+  criteria-eval Build a sampled review set, or score a labelled one
 
 Options:
   --db <path>            Path to vectors.db (required)
@@ -121,6 +136,27 @@ Supersede:
 Invalidated:
   --restore <record_id>  Clear invalid_at / superseded_by, putting the record back on recall
 
+Criteria:
+  --judge-url <url>      OpenAI-compatible chat endpoint (required unless --sample-from)
+  --judge-model <name>   Model to ask (required with --judge-url)
+  --pairs <path>         Review set to judge (required)
+  --mode <shadow|apply>  "shadow" records suggestions only; "apply" may also write the
+                         invalidation. Default "shadow".
+  --false-supersede-rate <0..1>
+                         The measured rate the gate stands on. Taken from outside this
+                         run, so a judge cannot certify itself. Missing = gate refuses.
+  --report <path>        Where to write the run report
+
+Criteria eval:
+  --set <path>           Labelled review set (with --verdicts)
+  --verdicts <path>      Human verdicts for that set, by pair id
+  --sample-from <path>   Draw pairs out of an UNLABELLED review set instead of scoring one;
+                         needs no --db and no endpoint, so a review set builds offline
+  --sample-size <n>      How many pairs --sample-from should draw (default 50)
+  --sample-out <path>    Where --sample-from writes the drawn pairs
+
+The judge endpoint is deliberately not defaulted: which model reads your memories is a
+deployment decision, and a silent default would make it someone else's.
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -150,6 +186,19 @@ async function main(argv: string[]): Promise<number> {
       reason: { type: "string" },
       apply: { type: "boolean", default: false },
       restore: { type: "string" },
+      pairs: { type: "string" },
+      mode: { type: "string", default: "shadow" },
+      set: { type: "string" },
+      verdicts: { type: "string" },
+      "sample-from": { type: "string" },
+      "sample-size": { type: "string" },
+      "sample-out": { type: "string" },
+      "false-supersede-rate": { type: "string" },
+      suggestions: { type: "boolean", default: false },
+      limit: { type: "string" },
+      report: { type: "string" },
+      "judge-url": { type: "string" },
+      "judge-model": { type: "string" },
       "dry-run": { type: "boolean", default: false },
       notes: { type: "string" },
       json: { type: "boolean", default: false },
@@ -162,9 +211,17 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return command ? 0 : 1;
   }
+  // Sampling a review set needs no database: it reads one review set and writes another.
+  if (command === "criteria" && values["sample-from"]) {
+    return runSampleCommand(values["sample-from"], values as unknown as Record<string, unknown>);
+  }
 
-  const dbPath = values.db;
-  if (!dbPath) {
+  // `criteria-eval` reads two JSON files and never opens a database, so requiring --db
+  // there was a constraint with nothing behind it. Every other command does open one.
+  // The empty-string default keeps the type a plain string for the commands that do use
+  // it; reaching them with no --db is still an error, two lines down.
+  const dbPath = values.db ?? "";
+  if (!dbPath && command !== "criteria-eval") {
     process.stderr.write("error: --db is required\n");
     return 1;
   }
@@ -255,6 +312,21 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "audit") {
+    // `--suggestions` answers "what has the judge been saying?", which otherwise had no
+    // access path at all: the rows were in the table but nothing read them back.
+    if (values.suggestions) {
+      const rows = listSuggestions(dbPath, num(values.limit, 200));
+      if (values.json) {
+        process.stdout.write(JSON.stringify(rows, null, 2) + "\n");
+      } else if (rows.length === 0) {
+        process.stdout.write("no llm-suggest rows\n");
+      } else {
+        const lines = [`llm-suggest rows: ${rows.length}`, ""];
+        for (const r of rows) lines.push(`${r.record_id}  ${r.decided_at}`, `    ${r.reason}`);
+        process.stdout.write(lines.join("\n") + "\n");
+      }
+      return 0;
+    }
     const summary = auditSummary(dbPath);
     process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
     return 0;
@@ -349,6 +421,98 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(JSON.stringify(rows, null, 2) + "\n");
     } else {
       process.stdout.write(renderInvalidated(rows));
+    }
+    return 0;
+  }
+
+  if (command === "criteria") {
+    const mode = (values.mode ?? "shadow") as CriteriaMode;
+    if (mode !== "shadow" && mode !== "apply") {
+      process.stderr.write(`error: --mode must be shadow or apply, got "${values.mode}"\n`);
+      return 1;
+    }
+    // The judge is pluggable because tests must not touch a network, and because a
+    // deployment should not be welded to one vendor.
+    let provider: JudgeProvider | null = null;
+    if (values["judge-url"]) {
+      provider = httpProvider({
+        url: values["judge-url"],
+        model: values["judge-model"] ?? "unknown",
+        apiKey: process.env.JUDGE_API_KEY,
+      });
+    }
+    if (!provider) {
+      process.stderr.write(
+        "error: no judge provider. Pass --judge-url <chat-completions endpoint> and --judge-model <id>.\n" +
+          "       The judge is deliberately not wired to a default endpoint: which model reads your\n" +
+          "       memories is a deployment decision, and a silent default would make it someone else's.\n",
+      );
+      return 1;
+    }
+
+    let pairs: ReviewSet;
+    try {
+      pairs = JSON.parse(readFileSync(values.pairs ?? "", "utf8")) as ReviewSet;
+    } catch (err) {
+      process.stderr.write(`error: --pairs must be readable JSON: ${(err as Error).message}\n`);
+      return 1;
+    }
+
+    // The gate needs a number from OUTSIDE this run. Taking it as an argument means a
+    // judge cannot certify itself by being confident.
+    //
+    // "Not supplied" and "supplied as empty" are the same thing here, and both are null,
+    // not 0. `Number("")` is 0, so the naive version of this line turned
+    // `--false-supersede-rate=` (an unset shell variable, a typo) into "measured 0%,
+    // gate open" and let every supersede through. Refusing to measure is not a pass.
+    const rate = parseOptionalRate(values["false-supersede-rate"]);
+    const gate = checkApplyGate(rate, values.report);
+    if (mode === "apply" && !gate.allowed) {
+      process.stderr.write(gate.message + "\n");
+      return 5;
+    }
+    return await runCriteriaCommand(dbPath, pairs, mode, provider, rate, values.report, values.json);
+  }
+
+  if (command === "criteria-eval") {
+    let set: ReviewSet;
+    let verdicts: Record<string, SupersedeVerdict | null>;
+    try {
+      set = JSON.parse(readFileSync(values.set ?? "", "utf8")) as ReviewSet;
+      verdicts = JSON.parse(readFileSync(values.verdicts ?? "", "utf8")) as Record<string, SupersedeVerdict | null>;
+    } catch (err) {
+      process.stderr.write(`error: --set and --verdicts must be readable JSON: ${(err as Error).message}\n`);
+      return 1;
+    }
+    const judged = new Map(Object.entries(verdicts));
+    const matrix = evaluate(set.pairs, judged);
+    // This number is what opens the apply gate, so it has to outlive the terminal it was
+    // printed in. Written before the summary so a report on disk always accompanies the
+    // rate an operator is about to paste into --false-supersede-rate.
+    if (values.report) {
+      writeFileSync(
+        values.report,
+        JSON.stringify(
+          {
+            report: "criteria-eval/1",
+            reviewSet: set.version,
+            sampling: set.sampling,
+            labelledBy: set.labelledBy ?? null,
+            labelledAt: set.labelledAt ?? null,
+            pairs: set.pairs.length,
+            matrix,
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+    }
+    if (values.json) {
+      process.stdout.write(JSON.stringify(matrix, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderEvaluation(matrix, set, judged, "see the verdicts file"));
+      if (values.report) process.stdout.write("\nwrote the evaluation to " + values.report + "\n");
     }
     return 0;
   }
@@ -555,6 +719,110 @@ function renderInvalidated(rows: ReturnType<typeof listInvalidated>): string {
   }
   lines.push("", "clear one with: node src/cli.ts invalidated --db <path> --restore <record_id>");
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Run the judge and print what it decided.
+ *
+ * Shadow prints suggestions and says plainly that nothing was written. Apply prints what
+ * it changed. The two share one renderer so the difference between a rehearsal and a
+ * real run is a header line rather than two formats to compare by eye.
+ */
+async function runCriteriaCommand(
+  dbPath: string,
+  set: ReviewSet,
+  mode: CriteriaMode,
+  provider: JudgeProvider,
+  rate: number | null,
+  reportPath: string | undefined,
+  json: boolean | undefined,
+): Promise<number> {
+  const result = await runCriteria({
+    dbPath,
+    pairs: set.pairs,
+    mode,
+    judge: { provider },
+    measuredFalseSupersedeRate: rate,
+    reportPath,
+  });
+
+  if (json) {
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return 0;
+  }
+
+  const lines: string[] = [];
+  lines.push(mode === "apply" ? "CRITERIA (apply) — supersede verdicts were written" : "CRITERIA (shadow) — nothing was written to invalid_at");
+  lines.push(`  review set   ${set.version}  (${set.pairs.length} pairs)`);
+  lines.push(`  model        ${provider.modelId}`);
+  lines.push(`  prompt       ${PROMPT_VERSION}`);
+  lines.push(`  gate         ${rate === null ? "no measurement" : (rate * 100).toFixed(1) + "% false-supersede"}  threshold ${(LLM_APPLY_MAX_FALSE_SUPERSEDE * 100).toFixed(0)}%`);
+  lines.push("");
+  for (const o of result.outcomes) {
+    const verdict = o.verdict ?? `NOT JUDGED (${o.error})`;
+    lines.push(`  ${o.pairId}`);
+    const mark = o.applied ? "  [invalid_at WRITTEN]" : o.alreadyInvalid ? "  [already invalid, nothing written]" : "";
+    lines.push(`    -> ${verdict}${o.verdict ? `  confidence ${o.confidence.toFixed(2)}` : ""}${mark}`);
+  }
+  lines.push("");
+  lines.push(`audit rows written: ${result.auditRows}  (action='llm-suggest'${mode === "apply" ? " plus action='invalidate' for applied verdicts" : ""})`);
+  if (mode === "shadow") {
+    lines.push("shadow mode never writes invalid_at / superseded_by, and never touches state.");
+    lines.push("to act on these suggestions, first produce a false-supersede report and pass it with --false-supersede-rate.");
+  } else {
+    lines.push(`records invalidated by this run: ${result.invalidated.length}`);
+    // On a re-run over an already-invalidated set the count above is 0 while the judge
+    // still said "supersede". Saying so avoids the reading "the judge changed its mind".
+    const repeats = result.outcomes.filter((o) => o.alreadyInvalid).length;
+    if (repeats > 0) lines.push(`already invalid before this run: ${repeats}  (nothing written for those)`);
+  }
+  process.stdout.write(lines.join("\n") + "\n");
+  return 0;
+}
+
+/**
+ * Draw a candidate review set from a database copy.
+ *
+ * Deterministic on purpose: same database + same seed = same pairs, so the review set in
+ * the report can be regenerated and checked instead of trusted.
+ */
+function runSampleCommand(dbPath: string, values: Record<string, unknown>): number {
+  const rawSize = values["sample-size"];
+  const parsed = typeof rawSize === "string" ? Number(rawSize) : NaN;
+  const size = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 50;
+  const pairs = samplePairs(dbPath, { size, seed: 20261026 });
+  const set: ReviewSet = {
+    version: `review-set/${new Date().toISOString().slice(0, 10)}`,
+    sampling:
+      "adjacent-in-time pairs within one scene, content jaccard(3-gram) in [0.10, 0.90], " +
+      "sorted by seeded FNV-1a of pairId with seed 20261026, first N",
+    source: dbPath,
+    createdAt: new Date().toISOString(),
+    pairs,
+  };
+  const out = values["sample-out"];
+  if (typeof out === "string" && out.length > 0) {
+    writeFileSync(out, JSON.stringify(set, null, 2), "utf8");
+    process.stdout.write(`wrote ${pairs.length} pairs to ${out}\n`);
+    process.stdout.write(`sampling rule: ${set.sampling}\n`);
+    return 0;
+  }
+  process.stdout.write(JSON.stringify(set, null, 2) + "\n");
+  return 0;
+}
+
+/**
+ * Parse `--false-supersede-rate`. Absent, blank, and unparseable all mean "no measurement".
+ *
+ * Returning null for a blank string is the whole point: `Number("")` is 0, which would
+ * read as a perfect score and open the apply gate on no evidence at all.
+ */
+function parseOptionalRate(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function renderPlan(plan: ForgettingPlanReport): string {

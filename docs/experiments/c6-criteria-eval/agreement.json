@@ -1,0 +1,59 @@
+{
+  "schema": "agreement/1",
+  "pairs": 50,
+  "annotators": {
+    "a1": {
+      "who": "lead-agent (DeepSeek-V4.1-Flash, dsh session)",
+      "at": "2026-11-04T10:55:00+08:00",
+      "counts": {
+        "supersede": 18,
+        "keep-both": 32,
+        "unrelated": 0
+      }
+    },
+    "a2": {
+      "who": "second-annotator (independent agent, no access to prior labels)",
+      "at": "2026-11-05T13:40:08.140Z",
+      "counts": {
+        "supersede": 4,
+        "keep-both": 46,
+        "unrelated": 0
+      }
+    }
+  },
+  "interAnnotator": {
+    "agree": 36,
+    "agreement": 0.72,
+    "kappa": 0.26778242677824254,
+    "confusion": {
+      "supersede|keep-both": 14,
+      "keep-both|keep-both": 32,
+      "supersede|supersede": 4
+    }
+  },
+  "judge": {
+    "model": "stub-1",
+    "supersedeCalls": 17
+  },
+  "falseSupersede": {
+    "vsA1": {
+      "trueSupersede": 5,
+      "falseSupersede": 12,
+      "missedSupersede": 13,
+      "rate": 0.7058823529411765
+    },
+    "vsA2": {
+      "trueSupersede": 2,
+      "falseSupersede": 15,
+      "missedSupersede": 2,
+      "rate": 0.8823529411764706
+    },
+    "vsConsensus": {
+      "trueSupersede": 2,
+      "falseSupersede": 12,
+      "missedSupersede": 2,
+      "rate": 0.8571428571428571
+    },
+    "consensusPairs": 36
+  }
+}
