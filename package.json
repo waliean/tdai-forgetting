@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "bench": "node bench/run-bench.ts",
     "sweep": "node bench/sweep.ts",
+    "health": "node scripts/healthcheck.ts",
     "rollback": "node scripts/rollback-forgetting.mjs"
   },
   "files": [
