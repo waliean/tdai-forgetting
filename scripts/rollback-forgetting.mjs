@@ -1,7 +1,13 @@
 /**
  * Roll one forgetting run back, exactly and only for the rows that run changed.
  *
- * Usage: node scripts/rollback-forgetting.mjs <run_id> <dbPath> [--dry-run]
+ * Usage: node scripts/rollback-forgetting.mjs <run_id> <dbPath> [--dry-run] [--records id1,id2,...]
+ *
+ * `--records` narrows the rollback to an explicit list of record ids. This is the
+ * common production case: a run archived forty records and three of them were wrong, so
+ * rolling the whole run back would also revive the thirty-seven that were right. The id
+ * list is still filtered through the same fingerprint, so an id that somebody has since
+ * touched is skipped rather than restored.
  *
  * dbPath falls back to $TDAI_DB and has no built-in default on purpose: an ops
  * script that guesses a relative path writes into whatever database happens to sit
@@ -63,10 +69,24 @@ function main(argv) {
   const dryRun = argv.includes("--dry-run") || argv.includes("-n");
   const positional = argv.filter((a) => !a.startsWith("-"));
 
+  // `--records` takes a comma-separated list; both `--records a,b` and `--records=a,b`
+  // are accepted because the two forms are typed about equally often.
+  let onlyIds = null;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const raw = arg === "--records" ? argv[i + 1] : arg.startsWith("--records=") ? arg.slice("--records=".length) : null;
+    if (raw === null) continue;
+    onlyIds = raw.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+    if (onlyIds.length === 0) {
+      console.error("--records needs at least one record id");
+      return EXIT_USAGE;
+    }
+  }
+
   const runId = positional[0];
   const dbPath = positional[1] ?? process.env.TDAI_DB;
   if (!runId || !dbPath) {
-    console.error("usage: node scripts/rollback-forgetting.mjs <run_id> <dbPath> [--dry-run]");
+    console.error("usage: node scripts/rollback-forgetting.mjs <run_id> <dbPath> [--dry-run] [--records id1,id2]");
     console.error("       dbPath may come from $TDAI_DB instead of the command line");
     return EXIT_USAGE;
   }
@@ -126,6 +146,15 @@ function main(argv) {
               AND r.forget_reason = a.reason
               AND r.forgotten_time = a.decided_at`,
       ).run(runId);
+      if (onlyIds) {
+        // Narrow to the requested ids after the fingerprint match, never before: the
+        // fingerprint is what decides whether a row is safe to restore, and an explicit
+        // id list is a request, not evidence.
+        db.prepare(
+          `DELETE FROM a5_rb WHERE record_id NOT IN (${onlyIds.map(() => "?").join(",")})`,
+        ).run(...onlyIds);
+        console.log("partial_requested", onlyIds.length, "partial_fingerprint_usable", one("SELECT COUNT(*) AS c FROM a5_rb").c);
+      }
       const targets = one("SELECT COUNT(*) AS c FROM a5_rb").c;
       const skipped = one(
         `SELECT COUNT(*) AS c FROM forgetting_audit a

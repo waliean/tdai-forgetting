@@ -502,3 +502,56 @@ test("a broken invariant exits 4", () => {
     db.cleanup();
   }
 });
+
+test("--records restores only the listed ids and leaves the rest archived", () => {
+  const db = seedDb(5);
+  try {
+    seedArchivedRun(db.path, db.ids, "run-partial", T1);
+    const [first, second, third, fourth, fifth] = db.ids;
+    const r = runScript(["run-partial", db.path, "--records", `${first},${second}`]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(num(r.stdout, "records_restored"), 2);
+    assert.equal(num(r.stdout, "partial_requested"), 2);
+    assert.equal(num(r.stdout, "partial_fingerprint_usable"), 2);
+
+    const states = readStates(db.path);
+    assert.equal(states[first], "active");
+    assert.equal(states[second], "active");
+    // The whole point: the other three were corrected decisions and must stay archived.
+    for (const id of [third, fourth, fifth]) {
+      assert.equal(states[id], "archived", `${id} must stay archived`);
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("--records still filters through the fingerprint: a touched id is not restored", () => {
+  const db = seedDb(4);
+  try {
+    seedArchivedRun(db.path, db.ids, "run-partial-2", T1);
+    const [first, touched, ...rest] = db.ids;
+
+    // Somebody edited the record after the run: the fingerprint no longer matches, so the
+    // explicit id is a request the script must still refuse.
+    const writer = new DatabaseSync(db.path);
+    try {
+      writer.prepare("UPDATE l1_records SET forget_reason = 'edited by hand' WHERE record_id = ?").run(touched);
+    } finally {
+      writer.close();
+    }
+
+    const r = runScript(["run-partial-2", db.path, "--records", `${first},${touched}`]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(num(r.stdout, "records_restored"), 1);
+    assert.equal(num(r.stdout, "partial_requested"), 2);
+    assert.equal(num(r.stdout, "partial_fingerprint_usable"), 1);
+
+    const states = readStates(db.path);
+    assert.equal(states[first], "active");
+    assert.equal(states[touched], "archived");
+    for (const id of rest) assert.equal(states[id], "archived");
+  } finally {
+    db.cleanup();
+  }
+});
