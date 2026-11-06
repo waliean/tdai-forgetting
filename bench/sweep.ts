@@ -34,6 +34,8 @@ import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
 
 import { isTdaiDatabase, snapshotCorpus, syntheticCorpus } from "./corpus.ts";
+import { longtextCorpus } from "./corpus-long.ts";
+import { describeCorpus, formatStats } from "./corpus-stats.ts";
 import { buildQueries, collapseDuplicates, lexical, mean, measureWindow } from "./harness.ts";
 import { applyPins } from "../src/pin.ts";
 import { DEFAULT_DECAY, decayEnabled, rerankHits, trackingCoverage } from "../src/scoring.ts";
@@ -117,9 +119,7 @@ function loadCorpus(kind: string, dbPath?: string): MemoryRecord[] {
       return snapshotCorpus(dbPath);
     }
     case "longtext":
-      // Deliberately not silently treated as synthetic: a row labelled longtext that
-      // was measured on the short-text corpus is a wrong number nobody can detect later.
-      throw new Error("longtext corpus is not implemented yet (D2 adds the generator)");
+      return longtextCorpus();
     default:
       throw new Error(`unknown corpus "${kind}"; expected synthetic, snapshot or longtext`);
   }
@@ -210,6 +210,7 @@ async function main(): Promise<void> {
       queries: { type: "string", default: "24" },
       k: { type: "string", default: "10" },
       out: { type: "string" },
+      describe: { type: "boolean", default: false },
     },
   });
 
@@ -248,6 +249,12 @@ async function main(): Promise<void> {
     return;
   }
   records = applyPins(records);
+  if (values.describe) {
+    // On stderr and off the CSV: "what this corpus is made of" describes the input,
+    // while every CSV row describes an output. Mixing them would make one table whose
+    // columns mean two different things.
+    for (const line of formatStats(describeCorpus(records, values.corpus))) process.stderr.write(line + "\n");
+  }
   const coverage = trackingCoverage(records);
   const queryCount = Number(values.queries);
   const k = Number(values.k);

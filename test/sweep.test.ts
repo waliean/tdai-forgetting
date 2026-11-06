@@ -168,3 +168,25 @@ test("the default point reproduces run-bench's forgetting row", () => {
     close(rows[0][9], benchDupShare, "dupShare");
   });
 });
+
+test("--corpus longtext runs and writes a row", () => {
+  withTmp((dir) => {
+    const { status, csv } = sweepInto(dir, ["--corpus", "longtext"]);
+    assert.equal(status, 0, "the third corpus must run, not just be parsed");
+    const { rows } = parseCsv(csv);
+    assert.equal(rows.length, 1);
+  });
+});
+
+test("--describe writes the corpus profile to stderr and leaves the CSV alone", () => {
+  withTmp((dir) => {
+    const { status, stderr, csv } = sweepInto(dir, ["--corpus", "longtext", "--describe"]);
+    assert.equal(status, 0);
+    assert.match(stderr, /corpus longtext: 120 records/);
+    assert.match(stderr, /length \(chars\): min \d+, p50 \d+, p90 \d+, max \d+/);
+    assert.match(stderr, /duplicate groups at 0\.6: \d+/);
+    // A corpus profile describes the input; a CSV row describes an output. Mixing
+    // them would produce one table whose columns mean two different things.
+    assert.deepEqual(parseCsv(csv).header, EXPECTED_HEADER);
+  });
+});
