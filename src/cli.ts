@@ -384,7 +384,7 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write("error: --log is required for fold\n");
       return 1;
     }
-    const result = foldAccessLog(dbPath, logPath);
+    const result = foldAccessLog(dbPath, logPath, { now: foldClock() });
     if (values.json) {
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     } else {
@@ -667,7 +667,7 @@ function runSyntheticClimb(
     // written by a running deployment would: the earliest line is the oldest access.
     const at = new Date(Date.now() - (folds - cursor) * 60_000).toISOString();
     writeFileSync(logPath, JSON.stringify({ at, hits }) + "\n", "utf8");
-    const folded = foldAccessLog(dbPath, logPath);
+    const folded = foldAccessLog(dbPath, logPath, { now: foldClock() });
     // The archive is the fold's only durable output here, and a thousand of them would
     // be litter. Removing it is safe: the counters are already committed.
     if (folded.archivePath) rmSync(folded.archivePath, { recursive: true, force: true });
@@ -893,6 +893,20 @@ function renderAudit(summary: AuditSummary): string {
     lines.push(`    ${run.started_at}  archived:${run.archived} retired:${run.retired}  ${run.mode ?? "-"}  ${run.status}`);
   }
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Test-only clock for the fold archive name.
+ *
+ * `TDAI_FOLD_CLOCK` pins the instant used to name the archive so a rename collision can
+ * be built at one known path instead of pre-creating a directory per millisecond. Unset
+ * in production, where the system clock is the right answer.
+ */
+function foldClock(): Date | undefined {
+  const raw = process.env.TDAI_FOLD_CLOCK;
+  if (!raw) return undefined;
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? undefined : new Date(parsed);
 }
 
 function renderPlan(plan: ForgettingPlanReport): string {

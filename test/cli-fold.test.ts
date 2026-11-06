@@ -38,8 +38,11 @@ interface RunResult {
   stderr: string;
 }
 
-function runCli(args: string[]): RunResult {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8" });
+function runCli(args: string[], env: Record<string, string> = {}): RunResult {
+  const childEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) childEnv[k] = v;
+  for (const [k, v] of Object.entries(env)) childEnv[k] = v;
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env: childEnv });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -79,36 +82,6 @@ function withCorpus(
     db.cleanup();
     rmSync(logDir, { recursive: true, force: true });
   }
-}
-
-/**
- * Make the archive rename fail: pre-create a non-empty directory for every timestamp the
- * fold could stamp within a window around now. renameSync will not replace a directory,
- * so whichever millisecond it lands on, the target is occupied.
- *
- * The window has to cover the whole child process spawn (measured at ~95 ms locally, but
- * node --test runs files in parallel and the suite can stretch that). A window that is
- * too small makes this test flaky in the worst way — it would pass only by accident when
- * the fold happens to land inside it — so the caller asserts the collision really landed
- * by checking that the fold's own archive name was one of the directories we created.
- */
-function occupyArchiveNames(logPath: string, windowMs = 3000): { created: Set<string>; base: number } {
-  // Anchor to the real instant, not to the start of the current second. Quantizing to the
-  // second made the effective forward reach as short as windowMs - 999 ms, which is what let
-  // this test pass locally and fail under `node --test`'s parallel file scheduling.
-  const base = Date.now();
-  const created = new Set<string>();
-  for (let ms = -1000; ms <= windowMs; ms += 1) {
-    const name = logPath + ".folded-" + new Date(base + ms).toISOString().replace(/[:.]/g, "-");
-    try {
-      mkdirSync(name);
-      writeFileSync(join(name, "occupant"), "held open by another process");
-      created.add(name);
-    } catch {
-      /* already created by an earlier iteration */
-    }
-  }
-  return { created, base };
 }
 
 /** Reconstruct the archive path for a wall-clock instant, the way recall.ts names it. */
@@ -185,30 +158,23 @@ test("a second fold reads nothing and double-counts nothing", () => {
 });
 
 test("a fold whose log cannot be renamed exits non-zero and says so on stderr", () => {
+  // The archive name is derived from the fold's clock, and TDAI_FOLD_CLOCK pins it, so
+  // one pre-created directory is enough to force the collision. The previous version
+  // walked a 15-second window one millisecond at a time (16,001 directories with a file
+  // in each); on a Windows CI runner creating them took longer than the window itself,
+  // so the fold's timestamp landed outside it and the test failed while the code was
+  // fine. Pinning removes both the time dependence and the I/O cost.
+  const pinned = "2026-10-26T12:00:00.000Z";
   withCorpus(
     (logPath) => {
       writeFileSync(logPath, JSON.stringify({ at: "2026-10-26T12:00:00.000Z", hits: ["a"] }) + "\n");
     },
     (dbPath, logPath) => {
-      const { created: occupied, base } = occupyArchiveNames(logPath, 15000);
-      assert.ok(occupied.size > 0, "the collision window must actually create candidate directories");
+      const occupant = archiveNameFor(logPath, Date.parse(pinned));
+      mkdirSync(occupant);
+      writeFileSync(join(occupant, "occupant"), "held open by another process");
 
-      const r = runCli(["fold", "--db", dbPath, "--log", logPath]);
-      const after = Date.now();
-      const before = base;
-
-      // Prove the collision really landed instead of trusting that this run fell inside
-      // the window. The fold stamps its archive name from its own clock, which lies at or
-      // after `base` (the instant the occupancy was laid down) and before `after`, so if
-      // every candidate in that range was ours the rename was guaranteed to hit one.
-      // Without this check a too-narrow window would show up as a silent pass ("rename
-      // succeeded"), which is the opposite of the behaviour under test.
-      const collides = [];
-      for (let t = before; t <= after; t++) collides.push(occupied.has(archiveNameFor(logPath, t)));
-      assert.ok(
-        collides.some(Boolean),
-        `no pre-created directory covered the fold's archive name (${before}..${after}); widen windowMs`,
-      );
+      const r = runCli(["fold", "--db", dbPath, "--log", logPath], { TDAI_FOLD_CLOCK: pinned });
 
       // Not 0: the counters are committed but the log survived, so a second fold would
       // double-count. Silent success here is the defect this command exists to prevent.
@@ -226,7 +192,7 @@ test("a fold whose log cannot be renamed exits non-zero and says so on stderr", 
       // And the hazard is real, not theoretical: folding again replays the same line,
       // so the count goes 1 -> 2 for one access. Both folds also exit non-zero, because
       // the log still cannot be archived.
-      const again = runCli(["fold", "--db", dbPath, "--log", logPath]);
+      const again = runCli(["fold", "--db", dbPath, "--log", logPath], { TDAI_FOLD_CLOCK: pinned });
       assert.equal(readAccess(dbPath, "a").access_count, 2, "the still-present log is replayed: 1 -> 2");
       assert.equal(again.status, 3, again.stdout + again.stderr);
     },

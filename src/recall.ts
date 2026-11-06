@@ -79,7 +79,20 @@ export interface FoldResult {
  * dies between the rename and the commit, the un-folded data is still on disk under
  * the archive name and can be replayed by hand. Truncation would lose it silently.
  */
-export function foldAccessLog(dbPath: string, logPath: string): FoldResult {
+export interface FoldOptions {
+  /**
+   * Clock used for the archive name. Production passes nothing; tests pin it so a
+   * rename collision can be constructed at one exact path.
+   *
+   * Without this the only way to make renameSync fail was to pre-create a directory for
+   * every millisecond of a time window, which on a Windows CI runner meant creating
+   * 16,001 directories — slower than the window itself, so the fold's own timestamp
+   * landed outside it and the test failed while the code was fine.
+   */
+  now?: Date;
+}
+
+export function foldAccessLog(dbPath: string, logPath: string, opts: FoldOptions = {}): FoldResult {
   if (!existsSync(logPath) || statSync(logPath).size === 0) {
     return { linesRead: 0, recordsTouched: 0, rowsUpdated: 0 };
   }
@@ -138,7 +151,8 @@ export function foldAccessLog(dbPath: string, logPath: string): FoldResult {
     db.close();
   }
 
-  const archivePath = `${logPath}.folded-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const at = opts.now ?? new Date();
+  const archivePath = `${logPath}.folded-${at.toISOString().replace(/[:.]/g, "-")}`;
   try {
     renameSync(logPath, archivePath);
   } catch {
