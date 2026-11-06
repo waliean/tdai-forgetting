@@ -83,10 +83,16 @@ test("a fact's two versions are measurably the same text", () => {
   }
 });
 
-test("the default detector finds none of the 60 fact groups", () => {
+test("the default detector finds all 60 fact groups now that long text compares by blocks", () => {
   const records = applyPins(longtextCorpus());
   const clusters = findRedundancyClusters(records, DEFAULT_CLUSTER_OPTIONS);
-  assert.equal(clusters.length, 0, "60 fact groups are true duplicates, yet the shipped detector pairs none of them");
+  // Before the block path existed this was 0: whole-text Jaccard put a brief/full pair at
+  // 0.49-0.63 (some above the bar, some below) and the length prefilter rejected the rest
+  // before Jaccard even ran. Coverage asks the question the detector means.
+  assert.equal(clusters.length, 60, "one cluster per fact group");
+  for (const cluster of clusters) {
+    assert.equal(cluster.memberIds.length, 2, "each group is a brief and its full statement");
+  }
 });
 
 test("unrelated fact groups stay under the duplicate threshold", () => {
@@ -136,4 +142,17 @@ test("describeCorpus reports the statistics the calibration needs", () => {
   const lines = formatStats(stats);
   assert.match(lines[0], /corpus fixture: 4 records/);
   assert.match(lines.join("\n"), new RegExp(`duplicate groups at ${DEFAULT_CLUSTER_OPTIONS.threshold}: 1`));
+});
+
+test("turning the block path off brings the miss back, which is why it exists", () => {
+  const records = applyPins(longtextCorpus({ facts: 5 }));
+  assert.equal(findRedundancyClusters(records, DEFAULT_CLUSTER_OPTIONS).length, 5, "the block path finds every group");
+  // Same corpus, same corpus-wide threshold, only the length-based switch turned off.
+  // Whole-text Jaccard plus the length prefilter finds none of them — that is the defect
+  // docs/design/长文本相似度-2026-11-06.md measured, and this asserts the fix is the cause.
+  assert.equal(
+    findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, blockMinLength: 0 }).length,
+    0,
+    "whole-text Jaccard alone finds none of them",
+  );
 });

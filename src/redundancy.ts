@@ -51,7 +51,12 @@ export interface RedundancyCluster {
   /** Canonical member: the highest-scoring record in the cluster, kept on eviction. */
   leadId: string;
   memberIds: string[];
-  /** Similarity floor inside the cluster (min pairwise similarity). */
+  /**
+   * Similarity floor inside the cluster (min pairwise similarity).
+   *
+   * For a pair compared by the block path this is block coverage, not Jaccard — the two
+   * are different scales and only comparable within one mode.
+   */
   minSimilarity: number;
 }
 
@@ -62,6 +67,20 @@ export interface ClusterOptions {
   minLength: number;
   /** Only cluster within the same type; instruction and persona rarely duplicate each other. */
   sameTypeOnly: boolean;
+  /**
+   * Above this content length, compare by block coverage instead of whole-text Jaccard.
+   *
+   * 4-gram Jaccard falls as text grows even when the content is the same fact: measured
+   * on the long-text corpus, a fixed 100-character prefix scores 0.506 against a
+   * 200-character document and 0.111 against a 1200-character one. No single threshold
+   * serves both a 70-character note and a 1200-character document, so length decides
+   * which comparison runs. 0 disables the block path entirely.
+   */
+  blockMinLength: number;
+  /** Per-block similarity at or above which two blocks count as the same sentence. */
+  blockSimilarity: number;
+  /** Share of the shorter document's blocks that must find a match for the pair to merge. */
+  blockCoverage: number;
 }
 
 export const DEFAULT_CLUSTER_OPTIONS: ClusterOptions = {
@@ -75,7 +94,50 @@ export const DEFAULT_CLUSTER_OPTIONS: ClusterOptions = {
   threshold: 0.7,
   minLength: 40,
   sameTypeOnly: true,
+  // 400 is above the length where whole-text Jaccard stops being usable and below the
+  // shortest document in the long-text corpus (540 for a brief). Measured on that
+  // corpus: block coverage found 60/60 true pairs with 0/7,080 false merges; the
+  // length-tiered threshold found the same 60 but merged 9.4% of unrelated pairs.
+  // See docs/design/长文本相似度-2026-11-06.md.
+  blockMinLength: 400,
+  blockSimilarity: 0.8,
+  blockCoverage: 0.8,
 };
+
+/** Sentence-ish blocks: split on terminal punctuation, drop fragments too short to match. */
+function splitBlocks(text: string): string[] {
+  return text
+    .split(/[。！？!?\n]+/)
+    .map((block) => block.trim())
+    .filter((block) => block.length >= 12);
+}
+
+/**
+ * Share of `a`'s blocks that find a near-identical block in `b`.
+ *
+ * Jaccard asks "how much of the union do these share", which punishes `b` for being
+ * longer than `a`. Coverage asks "is each part of `a` present in `b`", which is what a
+ * duplicate detector means. A brief statement inside a longer restatement of the same
+ * fact scores 1.0 here and about 0.45 under Jaccard.
+ */
+function blockCoverageOf(a: string, b: string, blockSimilarity: number): number {
+  const blocksA = splitBlocks(a);
+  const blocksB = splitBlocks(b);
+  if (blocksA.length === 0 || blocksB.length === 0) return 0;
+  const setsB = blocksB.map((block) => shingles(block, 3));
+  let matched = 0;
+  for (const block of blocksA) {
+    const setA = shingles(block, 3);
+    let best = 0;
+    for (const setB of setsB) {
+      const similarity = jaccard(setA, setB);
+      if (similarity > best) best = similarity;
+      if (best >= blockSimilarity) break;
+    }
+    if (best >= blockSimilarity) matched++;
+  }
+  return matched / blocksA.length;
+}
 
 /**
  * Which copy survives a cluster.
@@ -143,14 +205,25 @@ export function findRedundancyClusters(
       const a = candidates[i];
       const b = candidates[j];
       if (opts.sameTypeOnly && a.type !== b.type) continue;
-      // Cheap prefilter: wildly different lengths cannot clear a 0.6 Jaccard bar.
-      const lenRatio = Math.min(a.content.length, b.content.length) / Math.max(a.content.length, b.content.length);
-      if (lenRatio < opts.threshold) continue;
-      const sim = jaccard(sets[i], sets[j]);
-      if (sim >= opts.threshold) {
-        union(a.record_id, b.record_id);
-        edgeSim.set(a.record_id + "|" + b.record_id, sim);
+
+      // Long documents are compared by block coverage, everything else by whole-text
+      // Jaccard. The two branches ask different questions, so the length prefilter below
+      // is deliberately skipped for the block path: a brief inside a longer restatement
+      // is the exact case the prefilter was rejecting (0.43 < 0.7) before Jaccard ran.
+      const longEnough = opts.blockMinLength > 0 && (a.content.length >= opts.blockMinLength || b.content.length >= opts.blockMinLength);
+      let sim: number;
+      if (longEnough) {
+        sim = blockCoverageOf(a.content, b.content, opts.blockSimilarity);
+        if (sim < opts.blockCoverage) continue;
+      } else {
+        // Cheap prefilter: wildly different lengths cannot clear the Jaccard bar.
+        const lenRatio = Math.min(a.content.length, b.content.length) / Math.max(a.content.length, b.content.length);
+        if (lenRatio < opts.threshold) continue;
+        sim = jaccard(sets[i], sets[j]);
+        if (sim < opts.threshold) continue;
       }
+      union(a.record_id, b.record_id);
+      edgeSim.set(a.record_id + "|" + b.record_id, sim);
     }
   }
 

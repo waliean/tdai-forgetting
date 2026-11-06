@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { findRedundancyClusters, jaccard, normalizeForShingles, shingles } from "../src/redundancy.ts";
+import { DEFAULT_CLUSTER_OPTIONS, findRedundancyClusters, jaccard, normalizeForShingles, shingles } from "../src/redundancy.ts";
 import type { MemoryRecord } from "../src/types.ts";
 
 function record(id: string, content: string, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
@@ -51,7 +51,7 @@ test("near-duplicates cluster and the higher-scoring copy leads", () => {
     ["b", 0.9],
     ["c", 0.5],
   ]);
-  const clusters = findRedundancyClusters(records, { threshold: 0.6, minLength: 20, sameTypeOnly: true }, scores);
+  const clusters = findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, threshold: 0.6, minLength: 20, sameTypeOnly: true }, scores);
   assert.equal(clusters.length, 1);
   assert.deepEqual(clusters[0].memberIds.sort(), ["a", "b"]);
   assert.equal(clusters[0].leadId, "b", "the best copy must survive");
@@ -64,7 +64,7 @@ test("single linkage chains transitively", () => {
     record("b", shared + "甲甲乙乙丙丙戊戊"),
     record("c", shared + "甲甲乙乙丙丙戊戊己己"),
   ];
-  const clusters = findRedundancyClusters(records, { threshold: 0.5, minLength: 10, sameTypeOnly: true });
+  const clusters = findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, threshold: 0.5, minLength: 10, sameTypeOnly: true });
   assert.equal(clusters.length, 1);
   assert.equal(clusters[0].memberIds.length, 3);
 });
@@ -76,12 +76,18 @@ test("different types are not clustered together by default", () => {
     record("b", text, { type: "episodic" }),
   ];
   assert.equal(findRedundancyClusters(records).length, 0);
-  assert.equal(findRedundancyClusters(records, { threshold: 0.6, minLength: 20, sameTypeOnly: false }).length, 1);
+  assert.equal(
+    findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, threshold: 0.6, minLength: 20, sameTypeOnly: false }).length,
+    1,
+  );
 });
 
 test("short records are skipped: their shingle sets are too noisy to compare", () => {
   const records = [record("a", "好的收到", {}), record("b", "好的收到", {})];
-  assert.equal(findRedundancyClusters(records, { threshold: 0.6, minLength: 40, sameTypeOnly: true }).length, 0);
+  assert.equal(
+    findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, threshold: 0.6, minLength: 40, sameTypeOnly: true }).length,
+    0,
+  );
 });
 
 test("no duplicate ids leak between clusters", () => {
@@ -91,7 +97,7 @@ test("no duplicate ids leak between clusters", () => {
     record("c", "第二组完全不同的另一段内容同样足够长以便通过最小长度过滤"),
     record("d", "第二组完全不同的另一段内容同样足够长以便通过最小长度过滤"),
   ];
-  const clusters = findRedundancyClusters(records, { threshold: 0.6, minLength: 20, sameTypeOnly: true });
+  const clusters = findRedundancyClusters(records, { ...DEFAULT_CLUSTER_OPTIONS, threshold: 0.6, minLength: 20, sameTypeOnly: true });
   assert.equal(clusters.length, 2);
   const seen = new Set<string>();
   for (const c of clusters) for (const id of c.memberIds) {
