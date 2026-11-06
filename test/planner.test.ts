@@ -132,3 +132,115 @@ test("score distribution is reported for threshold review", () => {
   const d = result.scoreDistribution;
   assert.ok(d.min <= d.p10 && d.p10 <= d.p50 && d.p50 <= d.p90 && d.p90 <= d.max);
 });
+
+// ── Invalidation pass (canvas C / c4-planner-pass) ──
+//
+// The pass reads `invalid_at`; it never decides whether a record was superseded. These
+// tests therefore set the field directly, which is also what the supersede command
+// does — there is no judgement to simulate.
+
+test("an invalidated record is archived even with a high score", () => {
+  const records = [
+    // Maximally healthy on every other axis: recent, important, frequently accessed.
+    // If invalidation lost to the score, this is the record that would expose it.
+    makeRecord({
+      record_id: "good-but-wrong",
+      updated_time: "2026-10-25T00:00:00.000Z",
+      priority: 99,
+      access_count: 50,
+      invalid_at: "2026-10-20T00:00:00.000Z",
+      superseded_by: "newer",
+    }),
+    makeRecord({ record_id: "fine", updated_time: "2026-10-25T00:00:00.000Z" }),
+  ];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "good-but-wrong");
+  assert.equal(d?.decision, "archive", "being contradicted overrides being important");
+  assert.match(d?.reason ?? "", /^invalid since /);
+  assert.equal(result.invalidated, 1);
+});
+
+test("the reason names the date and the successor, greppably", () => {
+  const records = [
+    makeRecord({ record_id: "old", invalid_at: "2026-10-20T00:00:00.000Z", superseded_by: "new" }),
+  ];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "old");
+  assert.equal(d?.reason, "invalid since 2026-10-20T00:00:00.000Z, superseded by new");
+});
+
+test("an invalid record with no successor says so instead of looking truncated", () => {
+  const records = [makeRecord({ record_id: "cancelled", invalid_at: "2026-10-20T00:00:00.000Z" })];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "cancelled");
+  assert.equal(d?.reason, "invalid since 2026-10-20T00:00:00.000Z, no successor");
+});
+
+test("invalidation is archive, never retire: a contradicted conclusion is still history", () => {
+  const records = [
+    makeRecord({
+      record_id: "ancient-and-wrong",
+      updated_time: "2020-01-01T00:00:00.000Z",
+      priority: 1,
+      invalid_at: "2026-10-20T00:00:00.000Z",
+    }),
+  ];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "ancient-and-wrong");
+  assert.equal(d?.decision, "archive", "retiring it would put it past the tier a reader checks");
+  assert.equal(result.retired, 0);
+});
+
+test("invalidation is decided before the absolute threshold", () => {
+  // Both passes would evict this record, and the decision is which reason gets
+  // recorded. Invalid is the more specific explanation, so it must be the one the
+  // audit shows -- otherwise "we were contradicted" is filed as "we got old".
+  const records = [
+    makeRecord({
+      record_id: "old-and-invalid",
+      updated_time: "2020-01-01T00:00:00.000Z",
+      priority: 1,
+      invalid_at: "2026-10-20T00:00:00.000Z",
+    }),
+  ];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "old-and-invalid");
+  assert.match(d?.reason ?? "", /^invalid since /, "the invalidation reason must win over the age reason");
+  assert.doesNotMatch(d?.reason ?? "", /score .* < retire/);
+});
+
+test("a hard pin beats invalidation, and the conflict is reported", () => {
+  const records = [
+    makeRecord({
+      record_id: "pinned-but-wrong",
+      priority: -1,
+      invalid_at: "2026-10-20T00:00:00.000Z",
+      superseded_by: "newer",
+    }),
+    makeRecord({ record_id: "plain", updated_time: "2026-10-25T00:00:00.000Z" }),
+  ];
+  const result = plan(records);
+  const d = result.decisions.find((x) => x.record.record_id === "pinned-but-wrong");
+  assert.equal(d?.decision, "keep", "an explicit human instruction wins over the flag");
+  assert.equal(result.invalidated, 0);
+  assert.equal(result.pinInvalidConflicts.length, 1, "and the collision must not be swallowed");
+  assert.equal(result.pinInvalidConflicts[0].record_id, "pinned-but-wrong");
+  assert.match(result.pinInvalidConflicts[0].pin_reason, /priority=-1|permanence/i);
+});
+
+test("maxEvictionsPerRun caps the invalidation pass like every other pass", () => {
+  const records = Array.from({ length: 5 }, (_, i) =>
+    makeRecord({ record_id: `inv${i}`, invalid_at: "2026-10-20T00:00:00.000Z" }),
+  );
+  const result = buildForgettingPlan(records, baseConfig(), { maxEvictionsPerRun: 1 });
+  const evicted = result.decisions.filter((d) => d.decision !== "keep");
+  assert.equal(evicted.length, 1, "the cap is a guard against a bad config wiping the corpus");
+  assert.equal(result.invalidated, 1);
+});
+
+test("a corpus with nothing invalidated reports 0 rather than omitting the field", () => {
+  const records = [makeRecord({ record_id: "fine", updated_time: "2026-10-25T00:00:00.000Z" })];
+  const result = plan(records);
+  assert.equal(result.invalidated, 0);
+  assert.deepEqual(result.pinInvalidConflicts, []);
+});

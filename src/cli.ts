@@ -2,13 +2,15 @@
 /**
  * Command line entry point.
  *
- * Commands, all read-only except apply and fold:
+ * Commands. Read-only except apply, fold, supersede --apply, and invalidated --restore:
  *   stats  - corpus shape, so a reviewer sees what is being forgotten before choosing thresholds
  *   plan   - build a forgetting plan and print/save it (never touches the database)
  *   apply  - execute a saved plan, or a fresh one with --dry-run for a rehearsal
  *   audit  - show current states and recent runs
  *   fold   - fold the recall access log into access_count / last_access_time
  *   coverage - report access-tracking coverage, the decay gate, and how much decay would move
+ *   supersede - mark a record as contradicted by a newer one (dry-run unless --apply)
+ *   invalidated - list every record currently marked invalid, so a mistake stays findable
  *
  * Usage:
  *   node src/cli.ts stats --db ./data/snapshot.db
@@ -17,6 +19,8 @@
  *   node src/cli.ts fold  --db ./data/snapshot.db --log ./data/recall-access.jsonl
  *   node src/cli.ts coverage --db ./data/snapshot.db
  *   node src/cli.ts coverage --db ./data/warm.db --fold-synthetic 200 --vectors l1_vec
+ *   node src/cli.ts supersede --db ./data/snapshot.db --old m_1 --new m_2 --reason "project cancelled"
+ *   node src/cli.ts invalidated --db ./data/snapshot.db --restore m_1
  */
 
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -29,6 +33,14 @@ import { applyPlan, auditSummary } from "./applier.ts";
 import { foldAccessLog, type FoldResult } from "./recall.ts";
 import { DEFAULT_DECAY } from "./scoring.ts";
 import { coverageClimb, coverageReport, type CoverageReport } from "./coverage.ts";
+import {
+  applySupersede,
+  listInvalidated,
+  planSupersede,
+  restoreRecord,
+  type SupersedeRejection,
+  type SupersedeResult,
+} from "./invalidation.ts";
 
 /**
  * The rename is the only thing that stops a second fold from double-counting, and
@@ -44,6 +56,25 @@ const FOLD_OUTPUT_WARNING = "warning: log NOT archived — counters committed; d
 const FOLD_SNAPSHOT_WARNING =
   "warning: --db looks like a snapshot copy — folding a copy only moves counters in the copy";
 
+/**
+ * Exit code 4 for a rejected supersede. Distinct from 1 (bad invocation) and 3 (the
+ * fold could not archive), because the three mean different things to a script: this
+ * one is "the database said no", and retrying without a change will fail the same way.
+ */
+const SUPERSEDE_REJECTED = 4;
+
+/** One line per rejection reason, so the operator is told what to fix, not just that it failed. */
+const SUPERSEDE_REJECTION_MESSAGES: Record<SupersedeRejection, string> = {
+  "empty-reason":
+    "error: --reason is required and must not be blank. It is the only record of why this " +
+    "record was invalidated, so a placeholder would be worse than nothing.",
+  "old-not-found": "error: --old does not name a record in this database; nothing was written.",
+  "new-not-found": "error: --new does not name a record in this database; nothing was written.",
+  "old-already-invalid":
+    "error: that record is already invalidated (invalid_at is set). Nothing was written; clear " +
+    "it first if you meant to change the reason. Use \`invalidated\` to see it.",
+};
+
 const USAGE = `tdai-forget <command> [options]
 
 Commands:
@@ -53,6 +84,8 @@ Commands:
   audit   Show current states and recent runs
   fold    Fold the recall access log into access_count / last_access_time
   coverage Report the access-tracking coverage, the decay gate, and what decay would move
+  supersede Mark a record as contradicted by a newer one (dry-run unless --apply)
+  invalidated List records currently marked invalid; --restore clears one
 
 Options:
   --db <path>            Path to vectors.db (required)
@@ -78,9 +111,19 @@ Options:
   --dry-run              Compute but do not write (apply only)
   --notes <text>         Note stored on the run row (apply only)
   --json                 Emit machine-readable JSON instead of a summary
+
+Supersede:
+  --old <record_id>      The record being contradicted (required)
+  --new <record_id>      The record that replaces it (optional: a cancelled project has none)
+  --reason <text>        Why it is being invalidated (required, must not be blank)
+  --apply                Actually write. Without it nothing is written.
+
+Invalidated:
+  --restore <record_id>  Clear invalid_at / superseded_by, putting the record back on recall
+
 `;
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -102,6 +145,11 @@ function main(argv: string[]): number {
       log: { type: "string" },
       "fold-synthetic": { type: "string" },
       vectors: { type: "string" },
+      old: { type: "string" },
+      new: { type: "string" },
+      reason: { type: "string" },
+      apply: { type: "boolean", default: false },
+      restore: { type: "string" },
       "dry-run": { type: "boolean", default: false },
       notes: { type: "string" },
       json: { type: "boolean", default: false },
@@ -114,6 +162,7 @@ function main(argv: string[]): number {
     process.stdout.write(USAGE);
     return command ? 0 : 1;
   }
+
   const dbPath = values.db;
   if (!dbPath) {
     process.stderr.write("error: --db is required\n");
@@ -248,6 +297,58 @@ function main(argv: string[]): number {
     if (isRenameFailure(result)) {
       process.stderr.write(FOLD_RENAME_FAILURE_MESSAGE + "\n");
       return 3;
+    }
+    return 0;
+  }
+
+  if (command === "supersede") {
+    if (!values.old) {
+      process.stderr.write("error: --old is required for supersede\n");
+      return 1;
+    }
+    const opts = {
+      oldId: values.old,
+      newId: values.new,
+      reason: values.reason ?? "",
+      apply: values.apply,
+    };
+    // Planning first even when --apply is set: the same function produces the dry-run
+    // report and the write, so the preview cannot describe something the write would
+    // not do. A rejection is reported before anything is opened for writing.
+    const preview = planSupersede(dbPath, opts);
+    if (preview.rejection) {
+      process.stderr.write(SUPERSEDE_REJECTION_MESSAGES[preview.rejection] + "\n");
+      return SUPERSEDE_REJECTED;
+    }
+
+    const result: SupersedeResult = values.apply ? applySupersede(dbPath, opts) : preview;
+    if (result.rejection) {
+      process.stderr.write(SUPERSEDE_REJECTION_MESSAGES[result.rejection] + "\n");
+      return SUPERSEDE_REJECTED;
+    }
+    if (values.json) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderSupersede(result, values.apply));
+    }
+    return 0;
+  }
+
+  if (command === "invalidated") {
+    if (values.restore) {
+      const restored = restoreRecord(dbPath, values.restore);
+      process.stdout.write(
+        restored
+          ? `restored ${values.restore}: invalid_at cleared, the record is recallable again\n`
+          : `no change: ${values.restore} is not invalidated (or does not exist)\n`,
+      );
+      return restored ? 0 : 1;
+    }
+    const rows = listInvalidated(dbPath);
+    if (values.json) {
+      process.stdout.write(JSON.stringify(rows, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderInvalidated(rows));
     }
     return 0;
   }
@@ -418,6 +519,44 @@ function hasForgettingColumnsForCli(dbPath: string): boolean {
   }
 }
 
+/**
+ * Render a supersede result. The dry run and the write share this, and the header line
+ * is the only difference — which is the point: an operator comparing a rehearsal with
+ * the real thing should not have to diff two formats in their head.
+ */
+function renderSupersede(result: SupersedeResult, applied: boolean): string {
+  const plan = result.plan!;
+  const lines = [
+    applied ? "INVALIDATED (written)" : "DRY RUN — nothing written",
+    `  record        ${plan.record!.record_id}`,
+    `  type          ${plan.record!.type}`,
+    `  state         ${plan.record!.state}   (unchanged: invalidation is not eviction)`,
+    `  invalid_at    ${plan.record!.invalid_at ?? "(none)"}  ->  ${plan.audit!.decided_at}`,
+    `  superseded_by ${plan.record!.superseded_by ?? "(none)"}  ->  ${plan.newId ?? "(none: no successor)"}`,
+    `  excerpt       ${plan.record!.excerpt}`,
+    `  reason        ${plan.reason}`,
+    "",
+    `  audit row     action=${plan.audit!.action} from_state=${plan.audit!.from_state} to_state=${plan.audit!.to_state}`,
+  ];
+  if (!applied) lines.push("", "  Re-run with --apply to write this.");
+  return lines.join("\n") + "\n";
+}
+
+/** Fixed column order so two listings a week apart can be compared line by line. */
+function renderInvalidated(rows: ReturnType<typeof listInvalidated>): string {
+  if (rows.length === 0) {
+    return "no invalidated records\n";
+  }
+  const lines = [`invalidated records: ${rows.length}`, ""];
+  for (const r of rows) {
+    lines.push(`${r.record_id}  ${r.invalid_at}`);
+    lines.push(`    type=${r.type}  state=${r.state}  superseded_by=${r.superseded_by ?? "(none)"}`);
+    lines.push(`    ${r.excerpt}`);
+  }
+  lines.push("", "clear one with: node src/cli.ts invalidated --db <path> --restore <record_id>");
+  return lines.join("\n") + "\n";
+}
+
 function renderPlan(plan: ForgettingPlanReport): string {
   const lines: string[] = [];
   lines.push(`plan        ${plan.generatedAt}`);
@@ -425,9 +564,21 @@ function renderPlan(plan: ForgettingPlanReport): string {
   lines.push(`pinned      ${plan.pinned}`);
   lines.push(`kept        ${plan.kept}`);
   lines.push(`archived    ${plan.archived}`);
+  // A subset of "archived", printed under it so the reader sees the split without
+  // grepping the decisions. The conflict block below appears only when there IS a
+  // conflict: a permanent "0" would train the reader to skip the line that matters.
+  lines.push(`  invalidated ${plan.invalidated}`);
   lines.push(`retired     ${plan.retired}`);
   lines.push(`clusters    ${plan.clusters.length} (redundant groups)`);
   lines.push(`review      ${plan.reviewCandidates.length} permanence-worded non-instructions`);
+  if (plan.pinInvalidConflicts.length > 0) {
+    lines.push("");
+    lines.push(`pin/invalid conflicts: ${plan.pinInvalidConflicts.length} (pin wins, nothing evicted)`);
+    for (const c of plan.pinInvalidConflicts) {
+      lines.push(`  ${c.record_id}  invalid since ${c.invalid_at}  but pinned: ${c.pin_reason}`);
+    }
+    lines.push("  a person has to decide which instruction they meant.");
+  }
   lines.push("");
   const byReason = new Map<string, number>();
   for (const d of plan.decisions) {
@@ -442,4 +593,12 @@ function renderPlan(plan: ForgettingPlanReport): string {
   return lines.join("\n") + "\n";
 }
 
-process.exitCode = main(process.argv.slice(2));
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err) => {
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    process.exitCode = 1;
+  },
+);

@@ -46,6 +46,17 @@ export interface MemoryRecord {
   /** Number of retrievals that returned this record. */
   access_count?: number;
   state?: MemoryState;
+  /**
+   * ISO timestamp of the moment this record was contradicted by a newer one, or
+   * by a decision that it no longer holds. NULL means "not invalidated".
+   *
+   * Deliberately not the same claim as `state`: an invalidated record is still
+   * active — nothing evicted it — it just must not be recalled. Keeping the two
+   * separate is what makes "undo the invalidation" a one-column update.
+   */
+  invalid_at?: string | null;
+  /** record_id of the record that replaced this one. NULL = invalid with no successor. */
+  superseded_by?: string | null;
   /** Set by the pin resolver. */
   pinned?: boolean;
   pin_kind?: PinKind;

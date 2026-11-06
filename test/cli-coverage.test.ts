@@ -98,12 +98,26 @@ test("coverage prints the five contract lines on a corpus with no access evidenc
     assert.equal(field(r.stdout, "decay active"), "false   (threshold 0.10)");
     assert.match(r.stdout, /^if decay on, reordered  top-10   \d+$/m);
 
-    // "reordered" is nonzero even though the gate is shut. That is deliberate: the
-    // number answers "what would change if the gate opened", which is the only reading
-    // that is useful on a cold deployment. A probe that passed decayActive would print
-    // 0 here and the command would have nothing to say during exactly the cold start it
-    // exists to watch.
-    assert.notEqual(field(r.stdout, "if decay on, reordered  top-10"), "0");
+    // The field is PRESENT on a cold corpus even though the gate is shut, and that is
+    // the property worth asserting: the number answers "what would change if the gate
+    // opened", so a probe that passed decayActive through would print 0 here and the
+    // command would have nothing to say during exactly the cold start it exists to watch.
+    assert.match(r.stdout, /^if decay on, reordered  top-10   \d+$/m);
+
+    // But it must not assert that this particular corpus reorders anything, and it used
+    // to. On a synthetic corpus whose ages run in the same direction as the fusion
+    // order, decay multiplies by a monotone factor and CANNOT permute the list, so the
+    // honest reading is 0. That is documented as a reading caveat in
+    // docs/design/访问追踪接线-2026-10-26.md §6.5.4 ("把年龄与融合顺序对齐的语料上,
+    // reordered 会是 0 ... 一个年轻语料本来就该读到低 reordered"), and this corpus is
+    // exactly that shape: one populated channel, records one day apart, oldest first.
+    //
+    // Asserting nonzero here made the test depend on a coincidence. It passed while the
+    // fixture happened to break the tie and broke as soon as anything moved, which is
+    // what happened when canvas C changed the fixture. Reading 0 and not flagging
+    // emptyRanking is the correct outcome, so that is now the assertion.
+    assert.equal(field(r.stdout, "if decay on, reordered  top-10"), "0", "an age-aligned corpus cannot reorder");
+    assert.doesNotMatch(r.stdout, /the probe ranked no candidates/, "0 here is a real reading, not an empty probe");
   } finally {
     c.cleanup();
   }
@@ -252,4 +266,53 @@ test("coverage requires --db like every other read command", () => {
   const r = runCli(["coverage"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--db is required/);
+});
+
+test("an age-INVERTED corpus does reorder, so the 0 above is a property of the corpus", () => {
+  // The companion to the assertion above. That corpus reads 0 because age and fusion
+  // order agree; this one reads nonzero because they disagree. Without this test, the
+  // 0 could be explained by "the probe is broken" instead of "the corpus is aligned",
+  // and nothing would tell the two apart.
+  //
+  // Reversing created_time relative to insertion order is enough: probeRanking ranks
+  // by lexical similarity first, so insertion order drives the fusion order while the
+  // timestamps now run the other way.
+  const db = createTempDb();
+  try {
+    migrate(db.path);
+    const count = 40;
+    const BASE = Date.parse("2026-10-20T00:00:00.000Z");
+    const records = Array.from({ length: count }, (_, i) =>
+      makeRecord({
+        record_id: `r${String(i).padStart(3, "0")}`,
+        content: `第 ${i} 条：这条记忆记录检索与访问追踪的实测结论，正文足够长以便参与相关性判断。`,
+        scene_name: "scene-" + (i % 5),
+        // Younger first: r000 is the newest, so the fusion order (oldest-first by
+        // insertion) runs opposite to the age order. The anchor is in the past on
+        // purpose — timestamps ahead of "now" clamp the age term and the multiplier
+        // stops varying, which flattens the reordering to 0 and hides the effect.
+        created_time: new Date(BASE - i * 86_400_000).toISOString(),
+        updated_time: new Date(BASE - i * 86_400_000).toISOString(),
+      }),
+    );
+    insertRecords(db.path, records);
+    const raw = new DatabaseSync(db.path);
+    try {
+      raw.exec("CREATE VIRTUAL TABLE l1_fts USING fts5(content, record_id UNINDEXED)");
+      const insert = raw.prepare("INSERT INTO l1_fts (content, record_id) VALUES (?, ?)");
+      for (const r of records) insert.run(`记忆 检索 访问 追踪 记录 ${r.record_id}`, r.record_id);
+    } finally {
+      raw.close();
+    }
+
+    const r = runCli(["coverage", "--db", db.path]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.notEqual(
+      field(r.stdout, "if decay on, reordered  top-10"),
+      "0",
+      "with age and fusion order opposed, decay must move positions",
+    );
+  } finally {
+    db.cleanup();
+  }
 });

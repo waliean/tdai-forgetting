@@ -70,11 +70,17 @@ function buildCorpus(factCount: number, seed = 20261026): Case[] {
     const stem = FACT_STEMS[f % FACT_STEMS.length];
     const records: MemoryRecord[] = [];
     let currentId = "";
+    // The newest restatement is built first so the older ones can point at it. Which
+    // record supersedes which is ground truth about the corpus, not something the
+    // retrieval path should have to work out.
+    const currentStamp = new Date(NOW.getTime() - 30 * 86_400_000).toISOString();
+    currentId = `fact${f}_v${VARIANTS.length}`;
+
     VARIANTS.forEach((render, v) => {
       const ageDays = [90, 60, 30][v];
       const stamp = new Date(NOW.getTime() - ageDays * 86_400_000).toISOString();
       const id = `fact${f}_v${v + 1}`;
-      if (v === VARIANTS.length - 1) currentId = id;
+      const superseded = v !== VARIANTS.length - 1;
       records.push({
         record_id: id,
         content: render(stem),
@@ -89,6 +95,11 @@ function buildCorpus(factCount: number, seed = 20261026): Case[] {
         access_count: 0,
         last_access_time: null,
         state: "active",
+        // The real columns, written the way the supersede command writes them: an
+        // older restatement is invalid as of the moment the newer one landed, and
+        // names it as its successor. Same shape a deployed corpus would carry.
+        invalid_at: superseded ? currentStamp : null,
+        superseded_by: superseded ? currentId : null,
         metadata_json: "{}",
       });
     });
@@ -136,13 +147,18 @@ async function main(): Promise<void> {
     },
   };
 
-  // Control: what an explicit supersession flag buys. Instead of inferring "old" from
-  // a timestamp, mark the two superseded restatements invalid and let the ranking see
-  // only valid facts. If this reaches 1.0, then decay is a proxy for a mechanism the
-  // schema could express exactly, and the recommendation is to add the flag rather
-  // than to calibrate the proxy.
-  const supersededIds = new Set(cases.flatMap((c) => c.records.filter((r) => r.record_id !== c.currentId).map((r) => r.record_id)));
-  configs["explicit-supersession"] = (c) => c.filter((h) => !supersededIds.has(h.record.record_id)).slice(0, k);
+  // Control: what the invalidation mechanism buys.
+  //
+  // This used to be simulated with an in-memory Set of "ids we decided are stale",
+  // which proved the concept but not the implementation: the set was ground truth the
+  // retrieval path would never have. It now reads the real `invalid_at` field that
+  // the supersede command writes (canvas C), so this column measures the shipped
+  // mechanism — the same predicate C3 put on the recall queries.
+  //
+  // The filter runs BEFORE the top-k slice, matching the query-side filter rather
+  // than post-truncating a window: a deployment drops invalid rows in SQL, so the
+  // window backfills from valid candidates instead of coming up short.
+  configs["invalidation"] = (c) => c.filter((h) => !h.record.invalid_at).slice(0, k);
 
   const results: Array<{ configuration: string; currentAtTop1: number; staleInWindow: number; coverage: number }> = [];
 
@@ -158,7 +174,11 @@ async function main(): Promise<void> {
       const window = apply(candidates);
       if (window[0]?.record.record_id === testCase.currentId) top1++;
       // Stale copies in the window are the failure this experiment is looking for.
-      stale += window.filter((h) => h.record.record_id !== testCase.currentId && h.record.scene_name === testCase.query).length;
+      // Counted from the corpus's own invalid_at, so the metric cannot drift from the
+      // ground truth even if a configuration forgets to filter.
+      stale += window.filter(
+        (h) => h.record.record_id !== testCase.currentId && h.record.scene_name === testCase.query,
+      ).length;
     }
     results.push({
       configuration: label,

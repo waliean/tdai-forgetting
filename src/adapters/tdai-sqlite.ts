@@ -44,6 +44,9 @@ export function loadRecords(dbPath: string, opts: LoadOptions = {}): MemoryRecor
   try {
     const cols = tableColumns(db, "l1_records");
     const migrated = cols.has("state") && cols.has("access_count") && cols.has("last_access_time");
+    // Invalidation is a later generation than the lifecycle columns, so it gets its
+    // own probe: a v1 database reads fine, it just has nothing invalidated in it.
+    const invalidatable = cols.has("invalid_at") && cols.has("superseded_by");
 
     const select = [
       "record_id",
@@ -60,6 +63,8 @@ export function loadRecords(dbPath: string, opts: LoadOptions = {}): MemoryRecor
       migrated ? "state" : "'active' AS state",
       migrated ? "access_count" : "0 AS access_count",
       migrated ? "last_access_time" : "NULL AS last_access_time",
+      invalidatable ? "invalid_at" : "NULL AS invalid_at",
+      invalidatable ? "superseded_by" : "NULL AS superseded_by",
     ].join(", ");
 
     const where: string[] = [];
@@ -97,6 +102,8 @@ export function loadRecords(dbPath: string, opts: LoadOptions = {}): MemoryRecor
       last_access_time: row.last_access_time ? String(row.last_access_time) : null,
       access_count: Number(row.access_count ?? 0),
       state: String(row.state ?? "active") as MemoryState,
+      invalid_at: row.invalid_at ? String(row.invalid_at) : null,
+      superseded_by: row.superseded_by ? String(row.superseded_by) : null,
       metadata_json: String(row.metadata_json ?? "{}"),
     }));
   } finally {

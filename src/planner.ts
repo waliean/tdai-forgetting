@@ -10,6 +10,11 @@
  * Decision order:
  *   1. Pins are resolved first and cost nothing to respect. Hard pins never enter
  *      any eviction list; extended pins enter it with a stretched half-life.
+ *   1.5 Invalidation comes next: a conclusion that has been contradicted does not get
+ *      to hold a slot just because it once scored well. It runs BEFORE the thresholds
+ *      on purpose — a record can be old AND invalid, and "invalid" is the more
+ *      specific explanation. It runs AFTER the pins because a pin is a human saying
+ *      "keep this", and when a human says both, the explicit instruction wins.
  *   2. Absolute thresholds retire ancient, low-value records. They run before
  *      redundancy because a record that is both stale and duplicated should be
  *      explained by its age, not by its neighbour.
@@ -53,6 +58,15 @@ export interface PlanOptions {
 }
 
 export interface ForgettingPlanReport extends ForgettingPlan {
+  /** Records archived because they were contradicted. A subset of `archived`. */
+  invalidated: number;
+  /**
+   * Records that are BOTH hard-pinned and invalid. The pin wins, so nothing is
+   * evicted — and the combination is surfaced rather than resolved silently, because
+   * "never forget this" and "this is no longer true" cannot both be satisfied and only
+   * a person can decide which instruction they meant.
+   */
+  pinInvalidConflicts: Array<{ record_id: string; type: string; invalid_at: string; pin_reason: string }>;
   /** Permanence-worded records that no pin rule protected. Empty under default rules. */
   reviewCandidates: Array<{ record_id: string; type: string; content: string }>;
   clusters: Array<{ leadId: string; memberIds: string[]; minSimilarity: number }>;
@@ -65,6 +79,20 @@ export interface ForgettingPlanReport extends ForgettingPlan {
   trackingCoverage: number;
   decayActive: boolean;
   config: { decay: DecayConfig; eviction: EvictionConfig };
+}
+
+/**
+ * The audit reason for an invalidation eviction.
+ *
+ * One format, built in one place, because the review criterion is that a reviewer can
+ * grep the audit for invalidations and recognise every one of them. The successor is
+ * spelled out when there is one — "superseded by nothing" is a real case (a cancelled
+ * project) and must not read like a missing field.
+ */
+function invalidReason(record: MemoryRecord): string {
+  const since = record.invalid_at ?? "unknown";
+  const by = record.superseded_by ? `superseded by ${record.superseded_by}` : "no successor";
+  return `invalid since ${since}, ${by}`;
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -128,6 +156,39 @@ export function buildForgettingPlan(
     if (s.record.pinned && s.record.pin_kind === "hard") markKeep(s, `pinned (hard): ${s.record.pin_reason}`);
   }
 
+  // ── Pass 0.5: invalidation ──
+  //
+  // Reads the field, does not judge it. "Who decided this record was superseded" is
+  // answered by the supersede command (or, behind its own gate, the LLM criteria) —
+  // the planner only acts on what is already recorded. A planner that inferred
+  // supersession would be the heuristic this whole canvas exists to replace.
+  //
+  // Archive, not retire: a contradicted conclusion is exactly the kind of thing worth
+  // keeping. "We thought so, then we found out otherwise" is history, and history
+  // needs to stay readable. Retiring it would put it past the archive tier where a
+  // later reader stops looking.
+  const pinInvalidConflicts: ForgettingPlanReport["pinInvalidConflicts"] = [];
+  for (const s of scored) {
+    if (!s.record.invalid_at) continue;
+    // The conflict check comes BEFORE the decided-guard, and that order is the whole
+    // point: Pass 0 has already decided every hard pin, so a guard-first loop can never
+    // reach one. Written guard-first — which is how it was written the first time —
+    // this block is dead code that reports zero conflicts forever while looking right.
+    // The planner test "a hard pin beats invalidation, and the conflict is reported"
+    // fails if this order is swapped back; it is the only thing that catches it.
+    if (s.record.pinned && s.record.pin_kind === "hard") {
+      pinInvalidConflicts.push({
+        record_id: s.record.record_id,
+        type: s.record.type,
+        invalid_at: s.record.invalid_at,
+        pin_reason: s.record.pin_reason ?? "",
+      });
+      continue;
+    }
+    if (!canEvict()) continue;
+    markEvict(s, "archive", invalidReason(s.record));
+  }
+
   // ── Pass 1: absolute thresholds ──
   for (const s of scored) {
     if (decided.has(s.record.record_id)) continue;
@@ -176,6 +237,10 @@ export function buildForgettingPlan(
 
   const archived = decisions.filter((d) => d.decision === "archive").length;
   const retired = decisions.filter((d) => d.decision === "retire").length;
+  // Counted from the decisions themselves, not from a counter incremented in the pass:
+  // a reviewer asking "how many of these archives were invalidations" should get the
+  // answer from the same list the audit is built from.
+  const invalidated = decisions.filter((d) => d.decision === "archive" && d.reason.startsWith("invalid since ")).length;
   const sortedScores = scored.map((s) => s.finalScore).sort((a, b) => a - b);
 
   return {
@@ -185,6 +250,8 @@ export function buildForgettingPlan(
     kept: survivors.length,
     archived,
     retired,
+    invalidated,
+    pinInvalidConflicts,
     decisions,
     survivors,
     reviewCandidates: unprotectedPermanence(pinned).map((r) => ({

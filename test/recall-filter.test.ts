@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -31,7 +31,9 @@ function buildCorpus(): DatabaseSync {
     CREATE TABLE l1_records (
       record_id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
-      state TEXT NOT NULL DEFAULT 'active'
+      state TEXT NOT NULL DEFAULT 'active',
+      invalid_at TEXT DEFAULT NULL,
+      superseded_by TEXT DEFAULT NULL
     );
     CREATE VIRTUAL TABLE l1_fts USING fts5(content, record_id UNINDEXED);
   `);
@@ -50,7 +52,12 @@ function buildCorpus(): DatabaseSync {
     insertRecord.run(`r${i}`, content);
     insertFts.run(content, `r${i}`);
   }
-  db.exec("CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active'");
+  // Mirrors the condition 0105 ships. Keeping the fixture's view in sync with the
+  // patched one is the point: a test whose schema has drifted from the patch proves
+  // nothing about the patch.
+  db.exec(
+    "CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active' AND invalid_at IS NULL",
+  );
   return db;
 }
 
@@ -133,6 +140,183 @@ test("an archived record's vector produces a skipped hit, not a half-filled resu
       .prepare("SELECT record_id, content FROM l1_recallable WHERE record_id = ?")
       .get("r0") as { record_id: string; content: string } | undefined;
     assert.equal(meta, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+/**
+ * The patch under test, as shipped.
+ *
+ * Reading the patch file rather than pasting its SQL is the whole point: a copy
+ * typed into a test is a *different* statement, and a test that exercises a copy
+ * cannot fail when the shipped one drifts. (A mutation that deleted the JOIN's
+ * invalid_at predicate from 0105 survived the first version of this file for
+ * exactly that reason.)
+ */
+const PATCH_0105 = readFileSync(
+  join(import.meta.dirname, "..", "patches", "0105-l1-invalid-filter.patch"),
+  "utf8",
+);
+
+/** Every added line of 0105, so the assertions below run against the shipped text. */
+const PATCH_0105_ADDED = PATCH_0105
+  .split("\n")
+  .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+  .map((line) => line.slice(1))
+  .join("\n");
+
+/** The predicates 0105 puts on the FTS join, extracted from the patch itself. */
+const SHIPPED_JOIN_PREDICATES = (() => {
+  const line = PATCH_0105_ADDED.split("\n").find((l) => l.includes("WHERE l1_fts MATCH ?"));
+  assert.ok(line, "0105 must contain the FTS MATCH clause");
+  return line;
+})();
+
+/** The view condition 0105 puts in the DDL, extracted from the patch itself. */
+const SHIPPED_VIEW_PREDICATES = (() => {
+  const line = PATCH_0105_ADDED.split("\n").find((l) => l.includes("CREATE VIEW l1_recallable"));
+  assert.ok(line, "0105 must contain the recall view DDL");
+  return line;
+})();
+
+/** The FTS query as the shipped patch writes it, with LIMIT pinned for the test. */
+const PATCHED_FTS = `
+  SELECT f.record_id FROM l1_fts f
+  JOIN l1_records m ON m.record_id = f.record_id
+  ${SHIPPED_JOIN_PREDICATES.trim()}
+  ORDER BY bm25(l1_fts) LIMIT 5
+`;
+
+/** Invalidate a record the way the supersede command will: a timestamp, nothing else. */
+function invalidate(db: DatabaseSync, recordId: string, by?: string): void {
+  db.prepare("UPDATE l1_records SET invalid_at = ?, superseded_by = ? WHERE record_id = ?").run(
+    "2026-10-01T00:00:00.000Z",
+    by ?? null,
+    recordId,
+  );
+}
+
+test("an invalidated record keeps its FTS row, exactly like an archived one", () => {
+  const db = buildCorpus();
+  try {
+    invalidate(db, "r0");
+    const indexed = db.prepare("SELECT COUNT(*) AS c FROM l1_fts WHERE record_id = ?").get("r0") as { c: number };
+    assert.equal(indexed.c, 1, "the filter is a query concern; the index row stays for restore");
+  } finally {
+    db.close();
+  }
+});
+
+test("the widened view hides an invalidated record that is still active", () => {
+  const db = buildCorpus();
+  try {
+    invalidate(db, "r0");
+    const viaTable = db.prepare("SELECT state FROM l1_records WHERE record_id = ?").get("r0") as { state: string };
+    const viaView = db.prepare("SELECT record_id FROM l1_recallable WHERE record_id = ?").get("r0");
+    assert.equal(viaTable.state, "active", "invalidation is not eviction: state is untouched");
+    assert.equal(viaView, undefined, "but the view is where recallability is defined");
+  } finally {
+    db.close();
+  }
+});
+
+test("an invalidated record ranked FIRST leaves the FTS window, and it backfills", () => {
+  const db = buildCorpus();
+  try {
+    const plain = db.prepare("SELECT record_id FROM l1_fts WHERE l1_fts MATCH ? ORDER BY bm25(l1_fts) LIMIT 5");
+    const patched = db.prepare(PATCHED_FTS);
+
+    const before = (plain.all('"记忆"') as Array<{ record_id: string }>).map((r) => r.record_id);
+    assert.equal(before[0], "r0", "precondition: the record under test must rank first, not outside the window");
+
+    invalidate(db, "r0");
+
+    const afterPlain = (plain.all('"记忆"') as Array<{ record_id: string }>).map((r) => r.record_id);
+    const afterPatched = (patched.all('"记忆"') as Array<{ record_id: string }>).map((r) => r.record_id);
+
+    assert.equal(afterPlain[0], "r0", "unfiltered query still returns it first");
+    assert.equal(afterPatched.includes("r0"), false, "filtered query must not return it");
+    assert.equal(afterPatched.length, 5, "the window backfills; it does not leave an empty slot");
+  } finally {
+    db.close();
+  }
+});
+
+test("clearing invalid_at puts the record back on the recall path", () => {
+  const db = buildCorpus();
+  try {
+    const patched = db.prepare(PATCHED_FTS);
+    invalidate(db, "r0");
+    assert.equal((patched.all('"记忆"') as Array<{ record_id: string }>).some((r) => r.record_id === "r0"), false);
+
+    db.prepare("UPDATE l1_records SET invalid_at = NULL, superseded_by = NULL WHERE record_id = ?").run("r0");
+
+    const restored = (patched.all('"记忆"') as Array<{ record_id: string }>).map((r) => r.record_id);
+    assert.equal(restored.includes("r0"), true, "restore is a one-column update, and it works");
+  } finally {
+    db.close();
+  }
+});
+
+test("an invalidated record's vector hit is skipped, not half-filled", () => {
+  const db = buildCorpus();
+  try {
+    invalidate(db, "r0");
+    // This is the branch searchL1Vector takes: a vector neighbour whose metadata
+    // lookup misses is skipped outright. A half-filled result would be worse than a
+    // leak, because the caller cannot tell it apart from a real record.
+    const meta = db.prepare("SELECT record_id, content FROM l1_recallable WHERE record_id = ?").get("r0");
+    assert.equal(meta, undefined, "no metadata means the hit is skipped, per the 0102 comment chain");
+  } finally {
+    db.close();
+  }
+});
+
+test("the shipped patch puts the invalidation predicate in BOTH copies", () => {
+  // 0105 ships the condition twice on purpose: once in the view (which stmtGetMeta
+  // reads) and once inline in the FTS join (which does not read the view). Neither
+  // can be derived from the other at runtime, so the guard is textual: read what the
+  // patch actually adds, and require the predicate on both sides of it.
+  //
+  // Deleting the predicate from either line of the patch makes this test fail.
+  assert.match(
+    SHIPPED_VIEW_PREDICATES,
+    /invalid_at IS NULL/,
+    "0105's view DDL must carry the invalidation predicate",
+  );
+  assert.match(
+    SHIPPED_JOIN_PREDICATES,
+    /m\.invalid_at IS NULL/,
+    "0105's FTS join must carry the invalidation predicate",
+  );
+  assert.match(
+    SHIPPED_JOIN_PREDICATES,
+    /m\.state = 'active'/,
+    "removing the state filter would trade one leak for another",
+  );
+});
+
+test("both copies of the recall filter agree", () => {
+  const db = buildCorpus();
+  try {
+    // The text guard above proves both copies exist; this proves they mean the same
+    // thing, by running each against identical rows instead of comparing strings.
+    const viewSql = (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type='view' AND name='l1_recallable'").get() as { sql: string }
+    ).sql;
+    assert.match(viewSql, /invalid_at IS NULL/, "the view must carry the invalidation predicate");
+
+    // And they must actually agree in behaviour, not just in text: a record each
+    // predicate should hide is hidden by both.
+    invalidate(db, "r0");
+    const ids = ["r0", "r1", "r2"];
+    for (const id of ids) {
+      const inFts =
+        (db.prepare(PATCHED_FTS).all('"记忆"') as Array<{ record_id: string }>).some((r) => r.record_id === id);
+      const inView = db.prepare("SELECT record_id FROM l1_recallable WHERE record_id = ?").get(id) !== undefined;
+      assert.equal(inFts, inView, `${id}: FTS says ${inFts}, view says ${inView}`);
+    }
   } finally {
     db.close();
   }

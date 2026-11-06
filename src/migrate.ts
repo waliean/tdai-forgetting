@@ -15,7 +15,17 @@
 
 import { DatabaseSync } from "node:sqlite";
 
-export const FORGETTING_SCHEMA_VERSION = 1;
+/**
+ * Schema generation.
+ *
+ * 1 - lifecycle state, access counters, and the fields that explain why a record
+ *     left the active set (canvas R, patches 0101-0103).
+ * 2 - invalidation fields (canvas C): "this conclusion was superseded", which is a
+ *     different claim from "nobody read this in a while". Version 2 also widens the
+ *     recall view, so a v1 database and a v2 database disagree about which rows are
+ *     recallable until the migration runs.
+ */
+export const FORGETTING_SCHEMA_VERSION = 2;
 
 /**
  * Idempotent column additions. SQLite has no ADD COLUMN IF NOT EXISTS, so the
@@ -28,12 +38,18 @@ export const COLUMN_ADDITIONS: Array<{ name: string; ddl: string }> = [
   { name: "last_access_time", ddl: "ALTER TABLE l1_records ADD COLUMN last_access_time TEXT DEFAULT NULL" },
   { name: "forget_reason", ddl: "ALTER TABLE l1_records ADD COLUMN forget_reason TEXT DEFAULT NULL" },
   { name: "forgotten_time", ddl: "ALTER TABLE l1_records ADD COLUMN forgotten_time TEXT DEFAULT NULL" },
+  // Invalidation (canvas C). Not part of the decay story: decay ranks, invalidation
+  // excludes. Both are NULL by default and carry no NOT NULL, so an unmigrated
+  // reader keeps working and a record can be invalid with no replacement.
+  { name: "invalid_at", ddl: "ALTER TABLE l1_records ADD COLUMN invalid_at TEXT DEFAULT NULL" },
+  { name: "superseded_by", ddl: "ALTER TABLE l1_records ADD COLUMN superseded_by TEXT DEFAULT NULL" },
 ];
 
 export const INDEX_DDL: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_l1_state ON l1_records(state)",
   "CREATE INDEX IF NOT EXISTS idx_l1_last_access ON l1_records(last_access_time)",
   "CREATE INDEX IF NOT EXISTS idx_l1_access_count ON l1_records(access_count)",
+  "CREATE INDEX IF NOT EXISTS idx_l1_invalid_at ON l1_records(invalid_at)",
 ];
 
 /**
@@ -82,17 +98,38 @@ export const RUN_DDL: string[] = [
  * Retrieval view. The patched search path selects from here so archived and
  * retired rows disappear from recall without changing the table shape. One filter
  * in one place beats `state = 'active'` scattered across five query sites.
+ *
+ * The invalid_at filter belongs here for the same reason: a superseded record is
+ * still `active` — it was not evicted, it was contradicted — so the state filter
+ * alone lets it keep being recalled.
  */
 export const RECALL_VIEW_DDL: string[] = [
   "DROP VIEW IF EXISTS l1_recallable",
   `CREATE VIEW l1_recallable AS
-     SELECT * FROM l1_records WHERE state = 'active'`,
+     SELECT * FROM l1_records WHERE state = 'active' AND invalid_at IS NULL`,
 ];
 
 export interface MigrationResult {
   addedColumns: string[];
   existingColumns: string[];
   createdTables: string[];
+  /**
+   * The schema generation observed BEFORE this run, and the one it leaves behind.
+   * The column lists alone cannot tell a v1 database from a v2 one: both report
+   * five "existing" columns once migrated, and only `fromVersion < 2` says whether
+   * the invalidation columns were already there or were just added.
+   */
+  fromVersion: number;
+  toVersion: number;
+}
+
+/**
+ * Infer the schema generation from a column set. Anything below v2 is "1": there
+ * was only one generation that ever added columns, so a database missing any of
+ * them has not been migrated at all.
+ */
+function schemaVersionOf(columns: Set<string>): number {
+  return columns.has("invalid_at") && columns.has("superseded_by") ? 2 : 1;
 }
 
 function tableColumns(db: DatabaseSync, table: string): Set<string> {
@@ -113,6 +150,7 @@ export function migrate(dbPath: string): MigrationResult {
       throw new Error(`l1_records not found in ${dbPath}: is this a tdai memory database?`);
     }
 
+    const fromVersion = schemaVersionOf(existing);
     const added: string[] = [];
     const already: string[] = [];
     db.exec("BEGIN IMMEDIATE");
@@ -142,6 +180,8 @@ export function migrate(dbPath: string): MigrationResult {
       addedColumns: added,
       existingColumns: already,
       createdTables: ["forgetting_audit", "forgetting_runs", "l1_recallable"],
+      fromVersion,
+      toVersion: FORGETTING_SCHEMA_VERSION,
     };
   } finally {
     db.close();

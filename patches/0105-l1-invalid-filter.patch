@@ -1,0 +1,54 @@
+diff --git a/MemoryCore/src/core/store/sqlite/memory-store.ts b/MemoryCore/src/core/store/sqlite/memory-store.ts
+index 5f96e26..70c05be 100644
+--- a/MemoryCore/src/core/store/sqlite/memory-store.ts
++++ b/MemoryCore/src/core/store/sqlite/memory-store.ts
+@@ -562,10 +562,20 @@ export class VectorStore implements IMemoryStore {
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_state ON l1_records(state)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_last_access ON l1_records(last_access_time)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_access_count ON l1_records(access_count)");
++    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_invalid_at ON l1_records(invalid_at)");
+     // One place defines "recallable". Five query sites each carrying state = 'active'
+     // is how a codebase ends up with six definitions of the same word.
++    //
++    // invalid_at is the second half of that definition, and it is not a synonym for
++    // state: an invalidated record is still 'active' — nothing evicted it — it was
++    // contradicted. Folding it into state would make "undo the invalidation" a state
++    // transition, which loses what the record was before.
++    //
++    // Same trap as 0102's: widening this condition only moves the queries that read
++    // the view. stmtGetMeta does; stmtL1FtsSearch does not — it joins l1_records
++    // directly and carries its own copy of the filter, which 0105 updates separately.
+     this.db.exec("DROP VIEW IF EXISTS l1_recallable");
+-    this.db.exec("CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active'");
++    this.db.exec("CREATE VIEW l1_recallable AS SELECT * FROM l1_records WHERE state = 'active' AND invalid_at IS NULL");
+ 
+     // Vector virtual table (cosine distance) — only created when dimensions > 0.
+     // When provider="none", dimensions=0 and vec0 tables are deferred until a
+@@ -1064,6 +1074,18 @@ export class VectorStore implements IMemoryStore {
+       // the statement above fails first on the missing view, which makes 0101 both a
+       // prerequisite for that query and the reason this one can prepare at all.
+       //
++      // invalid_at is carried here as well as in the view, and that duplication is
++      // deliberate: this statement joins l1_records, not l1_recallable, so it never
++      // sees the view's condition. The view is the definition a reader should consult;
++      // this clause is the copy that makes the definition true on this path. There is
++      // a test that fails if either copy drifts (test/recall-filter.test.ts, "both
++      // copies of the recall filter agree").
++      //
++      // An invalidated record's FTS row stays in l1_fts — same as an archived one.
++      // Deleting it would make the invalidation irreversible (a restore could not
++      // find it again) and would have to be repeated for every row the planner later
++      // touches. The filter is a query concern, not an index concern.
++      //
+       // Cost, old layout (MemoryCore/src/core/store/sqlite.ts, 822-record corpus):
+       // first query after a cold cache 0.42 ms → 2.45 ms, subsequent queries
+       // +0.1–0.2 ms.
+@@ -1107,7 +1129,7 @@ export class VectorStore implements IMemoryStore {
+                bm25(l1_fts) AS rank
+         FROM l1_fts f
+         JOIN l1_records m ON m.record_id = f.record_id
+-        WHERE l1_fts MATCH ? AND m.state = 'active'
++        WHERE l1_fts MATCH ? AND m.state = 'active' AND m.invalid_at IS NULL
+         ORDER BY rank ASC
+         LIMIT ?
+       `);

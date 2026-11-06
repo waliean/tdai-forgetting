@@ -59,11 +59,24 @@ export function insertRecords(dbPath: string, records: MemoryRecord[]): void {
       (c) => c.name,
     );
     const hasForgetting = cols.includes("state") && cols.includes("access_count") && cols.includes("last_access_time");
-    const sql = hasForgetting
-      ? `INSERT INTO l1_records (record_id, content, type, priority, scene_name, team_id, user_id, agent_id, created_time, updated_time, metadata_json, state, access_count, last_access_time)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      : `INSERT INTO l1_records (record_id, content, type, priority, scene_name, team_id, user_id, agent_id, created_time, updated_time, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const hasInvalidation = cols.includes("invalid_at") && cols.includes("superseded_by");
+    const columns = [
+      "record_id",
+      "content",
+      "type",
+      "priority",
+      "scene_name",
+      "team_id",
+      "user_id",
+      "agent_id",
+      "created_time",
+      "updated_time",
+      "metadata_json",
+    ];
+    if (hasForgetting) columns.push("state", "access_count", "last_access_time");
+    if (hasInvalidation) columns.push("invalid_at", "superseded_by");
+    const sql = `INSERT INTO l1_records (${columns.join(", ")})
+         VALUES (${columns.map(() => "?").join(", ")})`;
     const stmt = db.prepare(sql);
     for (const r of records) {
       const base = [
@@ -79,11 +92,10 @@ export function insertRecords(dbPath: string, records: MemoryRecord[]): void {
         r.updated_time,
         r.metadata_json ?? "{}",
       ];
-      if (hasForgetting) {
-        stmt.run(...base, r.state ?? "active", r.access_count ?? 0, r.last_access_time ?? null);
-      } else {
-        stmt.run(...base);
-      }
+      const extra: Array<string | number | null> = [];
+      if (hasForgetting) extra.push(r.state ?? "active", r.access_count ?? 0, r.last_access_time ?? null);
+      if (hasInvalidation) extra.push(r.invalid_at ?? null, r.superseded_by ?? null);
+      stmt.run(...base, ...extra);
     }
   } finally {
     db.close();
@@ -104,6 +116,8 @@ export function makeRecord(overrides: Partial<MemoryRecord> = {}): MemoryRecord 
     updated_time: "2026-09-01T00:00:00.000Z",
     access_count: 0,
     last_access_time: null,
+    invalid_at: null,
+    superseded_by: null,
     metadata_json: "{}",
     ...overrides,
   };
