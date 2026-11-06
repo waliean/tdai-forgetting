@@ -167,7 +167,8 @@ docs/status/         各阶段收口与交接记录
 - **访问追踪已接线，但只在补丁里，且默认开启。** append-only 日志 + 离线折叠在本仓库（`src/recall.ts`），接进 `executeMemorySearch` 的是 `patches/0104-l1-recall-telemetry.patch`（叠在 0101–0103 之上）。它把 `memory.recall.accessLog.enabled` 的默认值定为 `true`，等于给检索路径加一次同步追加写——实测约 +0.14ms（基线 1.02ms 的 13.6%），详见[访问追踪延迟](docs/experiments/访问追踪延迟-2026-10-26.md)。不想要这个开销就把 `enabled` 显式设为 `false`。
 - **只处理 L1**。L0 对话、L2 场景、L3 画像的淘汰策略不同，不在本次范围。
 - **shingle 相似度对长文本的问题已处理**（画布 D5）。4-gram Jaccard 确实随长度稀释：100 字前缀比对 200 字文档是 0.506，比对 1200 字文档剩 0.111，单阈值无解。现在超过 400 字改按句子块覆盖率比较，在长文本语料上真重复召回 **60/60**、误合并 **0/7080**；分档阈值方案召回同样是 60/60 但误合并 **9.4%**，已否决。代价是长文本的比较从 O(1) Jaccard 变成块间两两比较。
-- **默认值已用扫描数据重定过**（画布 D4）：`halfLifeDays` 30→10、`floor` 0.3→0.2、`clusterThreshold` 0.6→0.7，选的是各自平台的中间而不是最优点。`minTrackingCoverage` 保持 0.1——三份语料上 0–0.2 无差异，它唯一被数据证明的价值是挡住 cold-start（强制开门时 precision 掉 7.9 个点）。`archiveThreshold` / `retireThreshold` 也保持原值，但那是**因为扫了没差异，不是因为验证过它们稳健**：三份语料的分数下界（0.471–0.550）都高于这两个阈值，它们根本没被触发过。见[参数敏感度](docs/experiments/参数敏感度-2026-11-06.md)与[默认值修订](docs/experiments/默认值修订-2026-11-06.md)。
+- **默认值已用扫描数据重定过**（画布 D4）：`halfLifeDays` 30→10、`floor` 0.3→0.2、`clusterThreshold` 0.6→0.7，选的是各自平台的中间而不是最优点。`minTrackingCoverage` 保持 0.1——三份语料上 0–0.2 无差异，它唯一被数据证明的价值是挡住 cold-start（强制开门时 precision 掉 7.9 个点）。见[参数敏感度](docs/experiments/参数敏感度-2026-11-06.md)与[默认值修订](docs/experiments/默认值修订-2026-11-06.md)。
+- **退休改成了分位口径**（`retirePercentile` 默认 0.1）。绝对值 `retireThreshold` 0.25 在三份语料上一次都没命中——分数下界是 0.401，高于它。分位切点取语料自身分数的底部 10%，**但只在 decay 门开时生效**：冷启动语料上「底部十分之一」意味着「最不重要的十分之一」，不该据此淘汰。代价是一个从未采集过访问数据的部署只会 archive，永远不会 retire。
 
 ## 上游状态
 

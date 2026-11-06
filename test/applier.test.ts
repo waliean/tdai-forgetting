@@ -22,7 +22,7 @@ function freshPlan(records: Parameters<typeof buildForgettingPlan>[0]) {
     // Thresholds sit inside the reachable band: an ancient high-priority record
     // scores about 0.67 (importance 0.95, decay pinned at the floor), a fresh one
     // about 0.99. 0.90/0.95 separates them cleanly without magic precision.
-    eviction: { ...DEFAULT_EVICTION, retireThreshold: 0.9, archiveThreshold: 0.95, minAgeDays: 0 },
+    eviction: { ...DEFAULT_EVICTION, retireThreshold: 0.9, archiveThreshold: 0.95, retirePercentile: 0, minAgeDays: 0 },
     now: () => NOW,
   });
 }

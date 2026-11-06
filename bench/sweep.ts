@@ -56,6 +56,7 @@ const GRID_KEYS = [
   "clusterThreshold",
   "archiveThreshold",
   "retireThreshold",
+  "retirePercentile",
 ] as const;
 type ParamKey = (typeof GRID_KEYS)[number];
 type GridPoint = Record<ParamKey, number>;
@@ -74,6 +75,7 @@ const DEFAULTS: GridPoint = {
   clusterThreshold: DEFAULT_CLUSTER_OPTIONS.threshold,
   archiveThreshold: DEFAULT_EVICTION.archiveThreshold,
   retireThreshold: DEFAULT_EVICTION.retireThreshold,
+  retirePercentile: DEFAULT_EVICTION.retirePercentile,
 };
 
 /** Legal domain per parameter. A violation skips the combination, it does not crash the run. */
@@ -84,6 +86,7 @@ const PARAM_RULES: Record<ParamKey, (value: number) => string | null> = {
   clusterThreshold: (v) => (v > 0 && v <= 1 ? null : "must be in (0, 1]"),
   archiveThreshold: (v) => (v >= 0 && v <= 1 ? null : "must be in [0, 1]"),
   retireThreshold: (v) => (v >= 0 && v <= 1 ? null : "must be in [0, 1]"),
+  retirePercentile: (v) => (v >= 0 && v < 1 ? null : "must be in [0, 1)"),
 };
 
 const CSV_HEADER = [
@@ -152,6 +155,7 @@ function evaluatePoint(
     ...DEFAULT_EVICTION,
     archiveThreshold: point.archiveThreshold,
     retireThreshold: point.retireThreshold,
+    retirePercentile: point.retirePercentile,
   };
   const decayOn = decayEnabled(coverage, decay);
 

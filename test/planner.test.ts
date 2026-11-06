@@ -12,7 +12,10 @@ const baseConfig = (eviction: Partial<typeof DEFAULT_EVICTION> = {}) => ({
   // Pin, redundancy and quota behaviour is what these tests cover; the cold-start
   // gate has its own tests, so it is held open here.
   decay: { ...DEFAULT_DECAY, minTrackingCoverage: 0 },
-  eviction: { ...DEFAULT_EVICTION, ...eviction },
+  // retirePercentile defaults to 0 here so these tests keep exercising the absolute
+  // retireThreshold they were written against. The percentile path has its own tests;
+  // mixing the two would make every fixture's expected count depend on corpus size.
+  eviction: { ...DEFAULT_EVICTION, retirePercentile: 0, ...eviction },
   now: () => NOW,
 });
 
@@ -243,4 +246,66 @@ test("a corpus with nothing invalidated reports 0 rather than omitting the field
   const result = plan(records);
   assert.equal(result.invalidated, 0);
   assert.deepEqual(result.pinInvalidConflicts, []);
+});
+
+test("retire cuts at the corpus percentile while the decay gate is open", () => {
+  // Twenty records with the same age and descending priority: with the gate open the
+  // cutoff is the corpus's own bottom slice, so exactly the configured share retires.
+  const records = Array.from({ length: 20 }, (_, i) =>
+    makeRecord({
+      record_id: `r${i}`,
+      updated_time: "2025-01-01T00:00:00.000Z",
+      priority: i, // 0..19, all low
+      access_count: 1, // any access history opens the gate
+      // Also old: ageAnchor prefers last_access_time, so a recent access would make the
+      // record "young" and keep it out of retirement regardless of its score.
+      last_access_time: "2025-01-01T00:00:00.000Z",
+    }),
+  );
+  const result = buildForgettingPlan(records, {
+    ...baseConfig({ retirePercentile: 0.25, archiveThreshold: 0, minAgeDays: 14 }),
+  });
+  // archiveThreshold 0 so nothing can be archived first and hide the retire count.
+  //
+  // 4 not 5: the cutoff is the value at index floor(0.25 * 19) = 4, and the comparison is
+  // strict `<`, so the record sitting on the cutoff stays. "Bottom quarter of 20" being
+  // 4 instead of 5 is the usual percentile-boundary off-by-one, not a bug — but it is why
+  // the shipped default is read as "about a tenth" rather than "exactly a tenth".
+  assert.equal(result.retired, 4, "bottom quarter of the score distribution, minus the cutoff record");
+  assert.ok(result.retireCut > 0 && result.retireCut < 1, "the resolved cut is reported");
+});
+
+test("retire ignores the percentile when the decay gate is shut", () => {
+  // No access data at all: coverage 0, gate shut. The score is importance alone, so
+  // "bottom quarter" would mean "least important quarter" — a judgement nobody asked the
+  // system to make. The absolute fallback applies instead, and at 0.25 nothing qualifies.
+  const records = Array.from({ length: 20 }, (_, i) =>
+    makeRecord({
+      record_id: `r${i}`,
+      updated_time: "2025-01-01T00:00:00.000Z",
+      // 0.30–0.49 after the importance mapping, i.e. above the 0.25 fallback: with the
+      // gate shut nothing should be retired. A percentile would have cut the bottom
+      // quarter regardless of where the scores sat.
+      priority: 30 + i,
+      access_count: 0,
+      last_access_time: null,
+    }),
+  );
+  const result = buildForgettingPlan(records, {
+    // minTrackingCoverage stays at its shipped 0.1 so the gate can actually shut: the
+    // shared baseConfig opens it deliberately, which is the opposite of what this case
+    // needs to prove.
+    decay: { ...DEFAULT_DECAY, minTrackingCoverage: 0.1 },
+    eviction: {
+      ...DEFAULT_EVICTION,
+      retirePercentile: 0.25,
+      retireThreshold: 0.25,
+      archiveThreshold: 0,
+      minAgeDays: 14,
+    },
+    now: () => NOW,
+  });
+  assert.equal(result.decayActive, false);
+  assert.equal(result.retired, 0, "a cold corpus retires nothing on a percentile");
+  assert.equal(result.retireCut, 0.25, "the absolute fallback is what applied");
 });

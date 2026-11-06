@@ -107,6 +107,22 @@ export interface EvictionConfig {
   archiveThreshold: number;
   /** Records scoring below this, and older than minAgeDays, are retired. */
   retireThreshold: number;
+  /**
+   * When > 0, retirement cuts at this percentile of the corpus's own score
+   * distribution instead of using `retireThreshold` — **but only while the decay gate is
+   * open**.
+   *
+   * Why a percentile: an absolute cutoff silently stops working when the score
+   * distribution moves under it. Measured after floor 0.3 -> 0.2 dropped the score floor
+   * from 0.471 to 0.401, `retireThreshold` 0.25 was below every record in all three
+   * corpora and never fired. A percentile cannot fall off the distribution that way.
+   *
+   * Why gated on decay: on a corpus with no access data the score is importance alone,
+   * so "bottom 10%" means "least important tenth" rather than "least useful" — retiring
+   * there would evict records on a signal nobody collected. With the gate shut the
+   * absolute fallback applies, which on such a corpus evicts nothing.
+   */
+  retirePercentile: number;
   /** Age gate for retire, in days: a burst of new low-score records should not be retired on day one. */
   minAgeDays: number;
 }

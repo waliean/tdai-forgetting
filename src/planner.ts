@@ -47,6 +47,8 @@ export const DEFAULT_EVICTION: EvictionConfig = {
   minRetain: 100,
   archiveThreshold: 0.45,
   retireThreshold: 0.25,
+  // Bottom 10% of the corpus's own scores, but only while decay is on. See the field doc.
+  retirePercentile: 0.1,
   minAgeDays: 14,
 };
 
@@ -78,6 +80,14 @@ export interface ForgettingPlanReport extends ForgettingPlan {
    */
   trackingCoverage: number;
   decayActive: boolean;
+  /**
+   * The score below which an old record is retired, after resolution.
+   *
+   * Reported because it is no longer simply `config.eviction.retireThreshold`: with a
+   * percentile configured and the decay gate open it is the corpus's own bottom slice.
+   * An operator comparing two runs needs to see which number actually applied.
+   */
+  retireCut: number;
   config: { decay: DecayConfig; eviction: EvictionConfig };
 }
 
@@ -125,6 +135,15 @@ export function buildForgettingPlan(
 
   const scored: ScoredRecord[] = active.map((r) => scoreRecord(r, scoringDecay, now));
   const scoreById = new Map(scored.map((s) => [s.record.record_id, s.finalScore]));
+
+  // One sorted copy feeds both the retire cutoff and the reported distribution.
+  const sortedScores = scored.map((s) => s.finalScore).sort((a, b) => a - b);
+  // Percentile only while the gate is open: with no access data the score is importance
+  // alone, so "bottom tenth" would mean "least important", not "least useful".
+  const retireCut =
+    decayOn && eviction.retirePercentile > 0
+      ? percentile(sortedScores, eviction.retirePercentile)
+      : eviction.retireThreshold;
 
   const clusters = findRedundancyClusters(active, clusterOpts, scoreById);
   const redundantNonLeads = new Map<string, string>();
@@ -193,11 +212,11 @@ export function buildForgettingPlan(
   for (const s of scored) {
     if (decided.has(s.record.record_id)) continue;
     const elderly = s.ageDays >= eviction.minAgeDays;
-    if (canEvict() && s.finalScore < eviction.retireThreshold && elderly) {
+    if (canEvict() && s.finalScore < retireCut && elderly) {
       markEvict(
         s,
         "retire",
-        `score ${s.finalScore.toFixed(3)} < retire ${eviction.retireThreshold}; age ${s.ageDays.toFixed(0)}d`,
+        `score ${s.finalScore.toFixed(3)} < retire ${retireCut.toFixed(3)}; age ${s.ageDays.toFixed(0)}d`,
       );
       continue;
     }
@@ -241,7 +260,6 @@ export function buildForgettingPlan(
   // a reviewer asking "how many of these archives were invalidations" should get the
   // answer from the same list the audit is built from.
   const invalidated = decisions.filter((d) => d.decision === "archive" && d.reason.startsWith("invalid since ")).length;
-  const sortedScores = scored.map((s) => s.finalScore).sort((a, b) => a - b);
 
   return {
     generatedAt: now.toISOString(),
@@ -271,6 +289,7 @@ export function buildForgettingPlan(
     },
     trackingCoverage: coverage,
     decayActive: decayOn,
+    retireCut,
     config: { decay, eviction },
   };
 }

@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { corpusStats, loadRecords } from "./adapters/tdai-sqlite.ts";
-import { buildForgettingPlan, type ForgettingPlanReport } from "./planner.ts";
+import { buildForgettingPlan, DEFAULT_EVICTION, type ForgettingPlanReport } from "./planner.ts";
 import { applyPlan, auditRun, auditSummary, reasonKey, type AuditSummary } from "./applier.ts";
 import { foldAccessLog, type FoldResult } from "./recall.ts";
 import { DEFAULT_DECAY } from "./scoring.ts";
@@ -171,6 +171,7 @@ async function main(argv: string[]): Promise<number> {
       floor: { type: "string" },
       archive: { type: "string" },
       retire: { type: "string" },
+      "retire-percentile": { type: "string" },
       "min-age": { type: "string" },
       "min-coverage": { type: "string" },
       team: { type: "string" },
@@ -266,6 +267,7 @@ async function main(argv: string[]): Promise<number> {
       minRetain: num(values["min-retain"], 100),
       archiveThreshold: num(values.archive, 0.45),
       retireThreshold: num(values.retire, 0.25),
+      retirePercentile: num(values["retire-percentile"], DEFAULT_EVICTION.retirePercentile),
       minAgeDays: num(values["min-age"], 14),
     },
   };
@@ -921,6 +923,10 @@ function renderPlan(plan: ForgettingPlanReport): string {
   // conflict: a permanent "0" would train the reader to skip the line that matters.
   lines.push(`  invalidated ${plan.invalidated}`);
   lines.push(`retired     ${plan.retired}`);
+  // The resolved cutoff, not the configured one: with a percentile and the gate open it
+  // is the corpus's own bottom slice, and an operator comparing runs needs the number
+  // that actually applied.
+  lines.push(`retire cut  ${plan.retireCut.toFixed(3)}`);
   lines.push(`clusters    ${plan.clusters.length} (redundant groups)`);
   lines.push(`review      ${plan.reviewCandidates.length} permanence-worded non-instructions`);
   if (plan.pinInvalidConflicts.length > 0) {

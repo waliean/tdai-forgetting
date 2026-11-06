@@ -1,6 +1,6 @@
-halfLifeDays,floor,minTrackingCoverage,clusterThreshold,archiveThreshold,retireThreshold,decayActive,precisionAtK,pinRecall,dupShare,evictedShare
-10,0.2,0.1,0.7,0.45,0.1,false,0.2375,1.0000,0.0000,0.0000
-10,0.2,0.1,0.7,0.45,0.15,false,0.2375,1.0000,0.0000,0.0000
-10,0.2,0.1,0.7,0.45,0.2,false,0.2375,1.0000,0.0000,0.0000
-10,0.2,0.1,0.7,0.45,0.25,false,0.2375,1.0000,0.0000,0.0000
-10,0.2,0.1,0.7,0.45,0.3,false,0.2375,1.0000,0.0000,0.0000
+halfLifeDays,floor,minTrackingCoverage,clusterThreshold,archiveThreshold,retireThreshold,retirePercentile,decayActive,precisionAtK,pinRecall,dupShare,evictedShare
+10,0.2,0.1,0.7,0.45,0.1,0,false,0.2375,1.0000,0.0000,0.0000
+10,0.2,0.1,0.7,0.45,0.15,0,false,0.2375,1.0000,0.0000,0.0000
+10,0.2,0.1,0.7,0.45,0.2,0,false,0.2375,1.0000,0.0000,0.0000
+10,0.2,0.1,0.7,0.45,0.25,0,false,0.2375,1.0000,0.0000,0.0000
+10,0.2,0.1,0.7,0.45,0.3,0,false,0.2375,1.0000,0.0000,0.0000

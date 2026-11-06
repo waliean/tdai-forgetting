@@ -68,6 +68,7 @@ const EXPECTED_HEADER = [
   "clusterThreshold",
   "archiveThreshold",
   "retireThreshold",
+  "retirePercentile",
   "decayActive",
   "precisionAtK",
   "pinRecall",
@@ -86,8 +87,8 @@ test("the default point writes the header plus one row carrying the shipped defa
     // Read from DEFAULT_DECAY / DEFAULT_CLUSTER_OPTIONS / DEFAULT_EVICTION, not typed
     // into the sweep: D4 revises a default, and a stale copy here would keep
     // calibrating a value the system no longer uses.
-    assert.deepEqual(rows[0].slice(0, 6), ["10", "0.2", "0.1", "0.7", "0.45", "0.25"]);
-    assert.equal(rows[0][6], "true", "synthetic corpus carries access history, so the gate opens");
+    assert.deepEqual(rows[0].slice(0, 7), ["10", "0.2", "0.1", "0.7", "0.45", "0.25", "0.1"]);
+    assert.equal(rows[0][7], "true", "synthetic corpus carries access history, so the gate opens");
   });
 });
 
@@ -165,9 +166,11 @@ test("the default point reproduces run-bench's forgetting row", () => {
         `${label}: sweep ${actual} vs run-bench ${expected.toFixed(3)}`,
       );
     };
-    close(rows[0][7], benchPrecision, "precisionAtK");
-    close(rows[0][8], benchPinRecall, "pinRecall");
-    close(rows[0][9], benchDupShare, "dupShare");
+    // Column offsets follow EXPECTED_HEADER: the six grid params, retirePercentile, then
+    // decayActive, then the metrics.
+    close(rows[0][8], benchPrecision, "precisionAtK");
+    close(rows[0][9], benchPinRecall, "pinRecall");
+    close(rows[0][10], benchDupShare, "dupShare");
   });
 });
 
