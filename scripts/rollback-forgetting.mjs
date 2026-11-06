@@ -69,6 +69,21 @@ function main(argv) {
   const dryRun = argv.includes("--dry-run") || argv.includes("-n");
   const positional = argv.filter((a) => !a.startsWith("-"));
 
+  // Unknown options are a usage error, never silently ignored. The rehearsal that
+  // produced this check typed `--rules` by mistake: the script dropped it, took the run
+  // id as the only positional, and rolled the WHOLE run back instead of one record. A
+  // typo must not widen the blast radius of a destructive command.
+  const knownFlags = new Set(["--dry-run", "-n", "--records"]);
+  for (const arg of argv) {
+    if (!arg.startsWith("-")) continue;
+    if (arg.startsWith("--records=")) continue;
+    if (!knownFlags.has(arg)) {
+      console.error("unknown option: " + arg);
+      console.error("       known: --dry-run, -n, --records <id1,id2>".replace("<id1,id2>", "id1,id2"));
+      return EXIT_USAGE;
+    }
+  }
+
   // `--records` takes a comma-separated list; both `--records a,b` and `--records=a,b`
   // are accepted because the two forms are typed about equally often.
   let onlyIds = null;

@@ -555,3 +555,21 @@ test("--records still filters through the fingerprint: a touched id is not resto
     db.cleanup();
   }
 });
+
+test("an unknown option is a usage error, not a silent full rollback", () => {
+  // Found during the container rehearsal: `--rules` (a typo for --records) was filtered
+  // out as "starts with a dash", so the script rolled the entire run back. A typo must
+  // never widen the blast radius of a destructive command.
+  const db = seedDb(3);
+  try {
+    seedArchivedRun(db.path, db.ids, "run-typo", T1);
+    const r = runScript(["run-typo", db.path, "--rules"]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /unknown option: --rules/);
+
+    const states = readStates(db.path);
+    for (const id of db.ids) assert.equal(states[id], "archived", `${id} must not be touched`);
+  } finally {
+    db.cleanup();
+  }
+});
