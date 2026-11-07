@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+
+const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 import { FORGETTING_SCHEMA_VERSION, hasForgettingSchema, migrate } from "../src/migrate.ts";
 import { loadRecords } from "../src/adapters/tdai-sqlite.ts";
@@ -258,5 +265,69 @@ test("loadRecords carries the invalidation columns through a v2 database", () =>
     assert.equal(byId.older.superseded_by, "newer");
   } finally {
     db.cleanup();
+  }
+});
+
+test("migrate is idempotent and reports what it changed", () => {
+  // The command exists so a deployment can migrate before starting the container; the
+  // property that makes it safe to run on every deploy is that a second run changes
+  // nothing and says so.
+  const db = createTempDb();
+  try {
+    insertRecords(db.path, [makeRecord({ record_id: "a" })]);
+
+    const first = spawnSync(process.execPath, [CLI, "migrate", "--db", db.path], { encoding: "utf8" });
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /version 1 -> 2/);
+    assert.match(first.stdout, /invalid_at/);
+
+    const second = spawnSync(process.execPath, [CLI, "migrate", "--db", db.path], { encoding: "utf8" });
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(second.stdout, /version 2 -> 2/);
+    assert.match(second.stdout, /added columns\s+\(none\)/);
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("migrate --dry-run changes nothing", () => {
+  const db = createTempDb();
+  try {
+    insertRecords(db.path, [makeRecord({ record_id: "a" })]);
+    const before = new DatabaseSync(db.path, { readOnly: true });
+    let beforeCols = 0;
+    try {
+      beforeCols = (before.prepare("PRAGMA table_info(l1_records)").all() as unknown as unknown[]).length;
+    } finally {
+      before.close();
+    }
+
+    const r = spawnSync(process.execPath, [CLI, "migrate", "--db", db.path, "--dry-run"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /would migrate/);
+    assert.match(r.stdout, /7 column\(s\) to add/);
+
+    const after = new DatabaseSync(db.path, { readOnly: true });
+    try {
+      const afterCols = (after.prepare("PRAGMA table_info(l1_records)").all() as unknown as unknown[]).length;
+      assert.equal(afterCols, beforeCols, "a dry run must not add a column");
+    } finally {
+      after.close();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("migrate refuses a path that is not a database", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tdai-migrate-"));
+  try {
+    const missing = join(dir, "nope.db");
+    const r = spawnSync(process.execPath, [CLI, "migrate", "--db", missing], { encoding: "utf8" });
+    assert.notEqual(r.status, 0);
+    // And it must not create the file: DatabaseSync's write mode creates by default.
+    assert.equal(existsSync(missing), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

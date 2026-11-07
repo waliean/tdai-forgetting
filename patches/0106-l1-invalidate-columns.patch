@@ -1,0 +1,31 @@
+diff --git a/MemoryCore/src/core/store/sqlite/memory-store.ts b/MemoryCore/src/core/store/sqlite/memory-store.ts
+index 70c05be..b3da567 100644
+--- a/MemoryCore/src/core/store/sqlite/memory-store.ts
++++ b/MemoryCore/src/core/store/sqlite/memory-store.ts
+@@ -557,12 +557,25 @@ export class VectorStore implements IMemoryStore {
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_agent_session ON l1_records(user_id, agent_id, session_id)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_updated  ON l1_records(user_id, updated_time)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_agent_updated ON l1_records(agent_id, updated_time)");
++    // Invalidation columns. 0105's index and view both reference `invalid_at`, but no
++    // earlier patch creates it — the column existed only in the harness repo's
++    // src/migrate.ts, which the container never runs. Creating the index on a database
++    // that never went through that migration throws "no such column"; initSchema's caller
++    // turns any throw into degraded mode, where every store operation is a silent no-op
++    // and the process still reports healthy. Reproduced on a copy of the live database.
++    //
++    // Guarded like 0101's ALTERs and for the same reason: on a fresh database they add
++    // the columns, on an already-migrated one they hit the catch.
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN invalid_at TEXT DEFAULT NULL"); } catch { /* exists */ }
++    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN superseded_by TEXT DEFAULT NULL"); } catch { /* exists */ }
+     // Forgetting indexes: the recall view filters on state, the planner sorts with
+     // the access columns, and audit queries scan by state.
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_state ON l1_records(state)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_last_access ON l1_records(last_access_time)");
+     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_access_count ON l1_records(access_count)");
+-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_invalid_at ON l1_records(invalid_at)");
++    // Belt and braces: the ALTER above should have made this succeed, and if it did not,
++    // taking the whole store down over an index is the wrong trade.
++    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_invalid_at ON l1_records(invalid_at)"); } catch { /* see above */ }
+     // One place defines "recallable". Five query sites each carrying state = 'active'
+     // is how a codebase ends up with six definitions of the same word.
+     //

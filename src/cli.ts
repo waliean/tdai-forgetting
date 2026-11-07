@@ -23,11 +23,12 @@
  *   node src/cli.ts invalidated --db ./data/snapshot.db --restore m_1
  */
 
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { corpusStats, loadRecords } from "./adapters/tdai-sqlite.ts";
+import { hasForgettingSchema, migrate } from "./migrate.ts";
 import { buildForgettingPlan, DEFAULT_EVICTION, type ForgettingPlanReport } from "./planner.ts";
 import { applyPlan, auditRun, auditSummary, reasonKey, type AuditSummary } from "./applier.ts";
 import { foldAccessLog, type FoldResult } from "./recall.ts";
@@ -92,6 +93,7 @@ const USAGE = `tdai-forget <command> [options]
 
 Commands:
   stats   Summarise the L1 corpus (records, types, states, months, pins)
+  migrate Bring a database up to the forgetting schema (columns, indexes, views)
   plan    Build a forgetting plan (no writes)
   apply   Apply a plan, or build + apply in one step
   audit   Show current states and recent runs
@@ -271,6 +273,50 @@ async function main(argv: string[]): Promise<number> {
       minAgeDays: num(values["min-age"], 14),
     },
   };
+
+  if (command === "migrate") {
+    // A standalone entry point, because the only thing that used to run migrate() was
+    // applyPlan — so "migrate then start the container" had no command to run, and the
+    // deployment instructions could only say "apply first", which also changes data.
+    //
+    // --dry-run reports what would happen by opening read-only and computing the same
+    // column diff, so an operator can look before touching production.
+    if (!hasForgettingSchema(dbPath) && !existsSync(dbPath)) {
+      process.stderr.write(`no such database: ${dbPath}\n`);
+      return 1;
+    }
+    if (values["dry-run"]) {
+      const db = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        const cols = new Set(
+          (db.prepare("PRAGMA table_info(l1_records)").all() as unknown as Array<{ name: string }>).map((r) => r.name),
+        );
+        if (cols.size === 0) {
+          process.stderr.write(`${dbPath} has no l1_records table\n`);
+          return 1;
+        }
+        const missing = ["state", "access_count", "last_access_time", "forget_reason", "forgotten_time", "invalid_at", "superseded_by"].filter(
+          (name) => !cols.has(name),
+        );
+        const version = cols.has("invalid_at") && cols.has("superseded_by") ? 2 : 1;
+        process.stdout.write(
+          `would migrate ${dbPath}: version ${version} -> 2, ${missing.length} column(s) to add\n` +
+            (missing.length > 0 ? `  ${missing.join(", ")}\n` : "  (columns already present; indexes and views would be re-created)\n"),
+        );
+        return 0;
+      } finally {
+        db.close();
+      }
+    }
+    const result = migrate(dbPath);
+    process.stdout.write(
+      `migrated ${dbPath}: version ${result.fromVersion} -> ${result.toVersion}\n` +
+        `  added columns   ${result.addedColumns.length > 0 ? result.addedColumns.join(", ") : "(none)"}\n` +
+        `  existing        ${result.existingColumns.length}\n` +
+        `  created tables  ${result.createdTables.length > 0 ? result.createdTables.join(", ") : "(none)"}\n`,
+    );
+    return 0;
+  }
 
   if (command === "plan") {
     const records = loadRecords(dbPath, { team_id: values.team, agent_id: values.agent, user_id: values.user });

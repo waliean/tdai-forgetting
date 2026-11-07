@@ -321,3 +321,42 @@ test("both copies of the recall filter agree", () => {
     db.close();
   }
 });
+
+test("0106 creates the invalidation columns before 0105's index needs them", () => {
+  // The deployment bug this patch exists for: 0105 creates an index on `invalid_at`, and
+  // no earlier patch adds that column — only src/migrate.ts does, which the container
+  // never runs. On a stock database the unguarded index throws "no such column", and
+  // initSchema's caller turns that into degraded mode: every store operation becomes a
+  // silent no-op while the process reports healthy.
+  //
+  // The patch text is the assertion, because this repo cannot run the container's
+  // initSchema. What can be checked is that 0106 adds both columns, guards them, and
+  // lands before the index — and that the index is no longer bare.
+  const patch = readFileSync(join(import.meta.dirname, "..", "patches", "0106-l1-invalidate-columns.patch"), "utf8");
+  const added = patch
+    .split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+
+  assert.match(added, /ALTER TABLE l1_records ADD COLUMN invalid_at TEXT DEFAULT NULL/, "the column 0105 needs");
+  assert.match(added, /ALTER TABLE l1_records ADD COLUMN superseded_by TEXT DEFAULT NULL/, "and its companion");
+  // Both ALTERs must be guarded, exactly like 0101's: an unguarded ALTER on a migrated
+  // database throws, and a throw here degrades the store. The patch preserves the file's
+  // indentation, so match with leading whitespace allowed.
+  for (const column of ["invalid_at", "superseded_by"]) {
+    const line = added.split("\n").find((l) => l.includes(`ADD COLUMN ${column}`));
+    assert.ok(line, `missing ALTER for ${column}`);
+    assert.match(line.trim(), /^try \{.*\} catch \{ \/\* exists \*\/ \}$/, `${column} ALTER must be wrapped in try/catch`);
+  }
+
+  // And the index line that used to be bare must now be guarded too.
+  const indexLine = added.split("\n").find((l) => l.includes("CREATE INDEX IF NOT EXISTS idx_l1_invalid_at"));
+  assert.ok(indexLine, "0106 must also touch the index line");
+  assert.match(indexLine.trim(), /^try \{.*\} catch/, "the index must not be able to take the store down");
+
+  // Ordering: the ALTERs have to come before the index, or the guard is pointless.
+  const alterAt = added.indexOf("ADD COLUMN invalid_at");
+  const indexAt = added.indexOf("idx_l1_invalid_at");
+  assert.ok(alterAt >= 0 && indexAt >= 0 && alterAt < indexAt, "columns first, then the index that uses them");
+});
